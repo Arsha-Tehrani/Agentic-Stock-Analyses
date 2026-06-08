@@ -2,17 +2,20 @@
 import aiohttp
 from datetime import datetime
 
+from src.config import WIRE_MAX_ARTICLES
+
 
 class WireIngestor:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.url = f"https://finnhub.io/api/v1/news?category=general&token={self.api_key}"
 
-    async def fetch_latest_wires(self, max_articles: int = 20) -> list:
+    async def fetch_latest_wires(self, max_articles: int | None = None) -> list:
+        limit = max_articles if max_articles is not None else WIRE_MAX_ARTICLES
         raw_data = await self._fetch_headlines()
         if not raw_data:
             return []
-        return self._normalize(raw_data[:max_articles])
+        return self._normalize(raw_data[:limit])
 
     async def _fetch_headlines(self) -> list:
         async with aiohttp.ClientSession() as session:

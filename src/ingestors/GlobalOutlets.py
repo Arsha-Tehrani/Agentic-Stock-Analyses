@@ -3,6 +3,8 @@ import asyncio
 from datetime import datetime
 import time
 
+from src.config import RSS_MAX_PER_FEED
+
 class RegionalRSSIngestor:
     def __init__(self, rss_feeds: dict):
         self.rss_feeds = rss_feeds
@@ -11,7 +13,7 @@ class RegionalRSSIngestor:
         loop = asyncio.get_running_loop()
         feed = await loop.run_in_executor(None, feedparser.parse, url)
         articles = []
-        for entry in feed.entries[:10]:
+        for entry in feed.entries[:RSS_MAX_PER_FEED]:
             ts = datetime.now()
             if hasattr(entry, 'published_parsed') and entry.published_parsed:
                 ts = datetime.fromtimestamp(time.mktime(entry.published_parsed))

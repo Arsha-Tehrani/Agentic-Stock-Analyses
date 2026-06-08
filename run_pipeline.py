@@ -1,5 +1,6 @@
 """
-run_pipeline.py – Multi-bucket news ingestion pipeline with Scout enrichment.
+run_pipeline.py – Multi-bucket news ingestion pipeline with Scout enrichment,
+emotional tonality analysis, and related-article clustering.
 
 Usage:
     python3 run_pipeline.py
@@ -14,21 +15,23 @@ from src.ingestors.MacroBlogs import MacroBlogIngestor
 from src.ingestors.GlobalOutlets import RegionalRSSIngestor
 from src.db.DatabaseSink import DatabaseSink
 from src.agents.ScoutNode import ScoutNode, ScoutArticle
+from src.agents.ToneAnalystNode import ToneAnalystNode
+from src.agents.ClusterFinder import ClusterFinder
+from src.agents.RegimeAnalystNode import RegimeAnalystNode
+from src.state import GraphState
+from src.config import (
+    WIRE_API_KEY,
+    BLOG_TARGETS,
+    REGIONAL_FEEDS,
+    IMPORTANCE_HIGH_THRESHOLD,
+    DISPARITY_HIGH_THRESHOLD,
+)
 
 
 async def main_pipeline() -> List[ScoutArticle]:
-    blog_targets = [
-        "https://www.bespokepremium.com/interactive/blog/",
-        "https://macrocompass.substack.com/"
-    ]
-    regional_feeds = {
-        "Nikkei Asia": "https://services.nikkei.com/core/v1/rss/asia/news.xml",
-        "Al Jazeera": "https://www.aljazeera.com/xml/rss/all.xml"
-    }
-
-    wire_client = WireIngestor(api_key="d8g80l9r01qlgcuhr95gd8g80l9r01qlgcuhr960")
-    blog_client = MacroBlogIngestor(target_urls=blog_targets)
-    regional_client = RegionalRSSIngestor(rss_feeds=regional_feeds)
+    wire_client = WireIngestor(api_key=WIRE_API_KEY)
+    blog_client = MacroBlogIngestor(target_urls=BLOG_TARGETS)
+    regional_client = RegionalRSSIngestor(rss_feeds=REGIONAL_FEEDS)
 
     print("=" * 60)
     print("🚀 Starting multi-bucket news ingestion pipeline...")
@@ -65,9 +68,25 @@ async def main_pipeline() -> List[ScoutArticle]:
     scout = ScoutNode()
     enriched_articles: List[ScoutArticle] = scout.enrich_batch(all_articles)
 
+    print("\n" + "=" * 60)
+    print("🎭 Emotional tonality analysis — separating emotion from facts...")
+    print("=" * 60)
+
+    tone_analyst = ToneAnalystNode()
+    enriched_articles = tone_analyst.analyze_batch(enriched_articles)
+
+    print("\n" + "=" * 60)
+    print("🔗 Cluster search — finding related articles for high-disparity pieces...")
+    print("=" * 60)
+
+    db_sink = DatabaseSink()
+    cluster_finder = ClusterFinder(db_sink=db_sink, tone_analyst=tone_analyst)
+    enriched_articles = cluster_finder.find_clusters(enriched_articles)
+
+    # ── Build NewsArticle list with emotional analysis data for DB persistence ──
     db_articles: List[NewsArticle] = []
     for sa in enriched_articles:
-        db_articles.append(NewsArticle(
+        article = NewsArticle(
             source_bucket=sa.source_bucket,
             source_name=sa.source_name,
             title=sa.title,
@@ -77,23 +96,61 @@ async def main_pipeline() -> List[ScoutArticle]:
             timestamp=sa.timestamp,
             ticker_tags=sa.ticker_tags,
             importance_score=sa.importance_score,
-        ))
+        )
+        if sa.emotional_analysis:
+            article.emotional_score = sa.emotional_analysis.emotional_score
+            article.factual_score = sa.emotional_analysis.factual_score
+            article.disparity_score = sa.emotional_analysis.disparity_score
+            article.tonality_label = sa.emotional_analysis.tonality_label
+            article.emotional_reasoning = sa.emotional_analysis.reasoning
+            article.emotional_phrases = sa.emotional_analysis.key_emotional_phrases
+            article.factual_claims = sa.emotional_analysis.key_factual_claims
+        db_articles.append(article)
 
     print("\n" + "=" * 60)
     print("💾 Persisting enriched articles to database...")
     print("=" * 60)
 
-    db_sink = DatabaseSink()
     rows_inserted = db_sink.insert_articles(db_articles)
 
+    print("\n" + "=" * 60)
+    print("🏛️  Regime Analyst — detecting macro shifts & capital rotation...")
+    print("=" * 60)
+
+    regime_analyst = RegimeAnalystNode()
+    state: GraphState = {
+        "articles": enriched_articles,
+        "market_state": {},
+        "regime_analysis": None,
+        "proceed_to_portfolio_manager": False,
+    }
+    state = regime_analyst.run_regime_analyst_node(state)
+    significant_count = 0
+
+    if state["proceed_to_portfolio_manager"]:
+        print("\n  🚨 REGIME CHANGE DETECTED! → routing to Portfolio Manager (Agent 3)")
+        print("  📋 Saving significant articles for later analysis...")
+        significant_count = db_sink.insert_significant_articles(
+            articles=db_articles,
+            signed_articles=enriched_articles,
+            regime_analysis=state["regime_analysis"],
+        )
+    else:
+        print("\n  ✅ No regime change — graph execution ends here.")
+
     total_in_db = db_sink.article_count()
-    high_importance = sum(1 for a in db_articles if a.importance_score and a.importance_score >= 0.7)
+    high_importance = sum(1 for a in db_articles if a.importance_score and a.importance_score >= IMPORTANCE_HIGH_THRESHOLD)
+    high_disparity = sum(1 for a in enriched_articles if a.emotional_analysis and a.emotional_analysis.disparity_score >= DISPARITY_HIGH_THRESHOLD)
+    clustered = sum(1 for a in enriched_articles if a.related_articles)
 
     print(f"\n📊 Database summary: {total_in_db} articles total in data/news.db")
-    print(f"   High-importance (≥0.7): {high_importance}")
-    print(f"   Scout-enriched:         {len(enriched_articles)}")
+    print(f"   High-importance (≥{IMPORTANCE_HIGH_THRESHOLD}):      {high_importance}")
+    print(f"   High emotional disparity:    {high_disparity}")
+    print(f"   Articles with clusters:      {clustered}")
+    print(f"   Significant articles saved:  {significant_count}")
+    print(f"   Scout-enriched:              {len(enriched_articles)}")
     print("=" * 60)
-    print("Pipeline finished. Scout-enriched articles ready for Regime Analyst.")
+    print("Pipeline finished. Regime-analyzed articles ready for review.")
     print("=" * 60)
 
     return enriched_articles

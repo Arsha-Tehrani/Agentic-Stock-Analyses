@@ -9,9 +9,10 @@ enrichment pipeline:
   3. aggregate_snippets() — DuckDuckGo returns top-5 snippets, concatenated
 
 The enriched result is a ScoutArticle ready for the Regime Analyst.
+
+All tunable constants are in src/config.py.
 """
 
-import os
 import json
 from typing import List, Optional
 
@@ -20,12 +21,21 @@ from google import genai
 
 from src.NewsArticle import NewsArticle
 from src.state import ScoutArticle
-
-# ---------------------------------------------------------------------------
-# Gemini configuration
-# ---------------------------------------------------------------------------
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+from src.config import (
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
+    SCOUT_DDG_MAX_RESULTS,
+    SCOUT_SUMMARY_MAX_CHARS,
+    SCOUT_IMPORTANCE_TEMPERATURE,
+    SCOUT_IMPORTANCE_MAX_TOKENS,
+    SCOUT_IMPORTANCE_PROMPT_CHARS,
+    SCOUT_QUERY_TEMPERATURE,
+    SCOUT_QUERY_MAX_TOKENS,
+    SCOUT_QUERY_PROMPT_CHARS,
+    SCOUT_HIGH_IMPACT_KWS,
+    SCOUT_MEDIUM_IMPACT_KWS,
+    SCOUT_HIGH_IMPACT_SOURCES,
+)
 
 
 class ScoutNode:
@@ -33,8 +43,6 @@ class ScoutNode:
     Enriches raw articles with importance scoring, contextual search queries,
     and aggregated web snippets.
     """
-
-    _DDG_MAX_RESULTS = 5
 
     def __init__(self):
         self._client: Optional[genai.Client] = None
@@ -55,7 +63,7 @@ class ScoutNode:
             source_bucket=article.source_bucket,
             source_name=article.source_name,
             title=article.title,
-            summary=article.summary or (article.content[:300] if article.content else ""),
+            summary=article.summary or (article.content[:SCOUT_SUMMARY_MAX_CHARS] if article.content else ""),
             url=article.url,
             timestamp=article.timestamp,
             ticker_tags=article.ticker_tags,
@@ -81,13 +89,13 @@ class ScoutNode:
             '{"score": 0.85, "reasoning": "Brief 1-sentence justification"}\n\n'
             f"Title: {article.title}\n"
             f"Source: {article.source_name} ({article.source_bucket})\n"
-            f"Summary: {article.summary or (article.content[:500] if article.content else 'N/A')}\n"
+            f"Summary: {article.summary or (article.content[:SCOUT_IMPORTANCE_PROMPT_CHARS] if article.content else 'N/A')}\n"
         )
         try:
             response = self._client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=prompt,
-                config={"temperature": 0.1, "max_output_tokens": 100},
+                config={"temperature": SCOUT_IMPORTANCE_TEMPERATURE, "max_output_tokens": SCOUT_IMPORTANCE_MAX_TOKENS},
             )
             text = response.text.strip()
             if text.startswith("```"):
@@ -103,27 +111,15 @@ class ScoutNode:
 
     def _heuristic_importance(self, article: NewsArticle) -> dict:
         text = (article.title + " " + (article.summary or article.content or "")).lower()
-        high_impact = [
-            "fed", "federal reserve", "interest rate", "cpi", "inflation",
-            "recession", "gdp", "employment", "nonfarm", "payroll",
-            "central bank", "policymaker", "tariff", "sanction",
-            "earnings", "corporate profit", "acquisition", "merger",
-            "stimulus", "jolts", "pmi", "manufacturing",
-        ]
-        medium_impact = [
-            "housing", "consumer", "retail", "trade deficit", "treasury",
-            "bond yield", "sp500", "nasdaq", "dow", "volatility",
-            "currency", "dollar", "euro", "yen", "emerging market",
-        ]
         score = 0.3
-        for kw in high_impact:
+        for kw in SCOUT_HIGH_IMPACT_KWS:
             if kw in text:
                 score = max(score, 0.7)
                 break
-        for kw in medium_impact:
+        for kw in SCOUT_MEDIUM_IMPACT_KWS:
             if kw in text:
                 score = max(score, 0.5)
-        if article.source_name.lower() in ("bloomberg", "reuters", "wsj", "financial times"):
+        if article.source_name.lower() in SCOUT_HIGH_IMPACT_SOURCES:
             score = max(score, 0.5)
         return {"score": round(score, 2), "reasoning": "Heuristic fallback (no Gemini key)"}
 
@@ -144,12 +140,12 @@ class ScoutNode:
             "- Prefer recent event framing.\n"
             "- Return ONLY the query string, no explanation, no quotes.\n\n"
             f"Title: {article.title}\n"
-            f"Summary: {article.summary or (article.content[:400] if article.content else 'N/A')}\n"
+            f"Summary: {article.summary or (article.content[:SCOUT_QUERY_PROMPT_CHARS] if article.content else 'N/A')}\n"
         )
         try:
             response = self._client.models.generate_content(
                 model=GEMINI_MODEL, contents=prompt,
-                config={"temperature": 0.2, "max_output_tokens": 60},
+                config={"temperature": SCOUT_QUERY_TEMPERATURE, "max_output_tokens": SCOUT_QUERY_MAX_TOKENS},
             )
             query = response.text.strip().strip('"').strip("'")
             return query if query else self._heuristic_query(article)
@@ -172,7 +168,7 @@ class ScoutNode:
         snippets: List[str] = []
         try:
             with DDGS() as ddgs:
-                for i, result in enumerate(ddgs.text(query, max_results=self._DDG_MAX_RESULTS)):
+                for i, result in enumerate(ddgs.text(query, max_results=SCOUT_DDG_MAX_RESULTS)):
                     body = result.get("body", "").strip()
                     if body:
                         snippets.append(f"[{i+1}] {result.get('title', '')}\n{body}")
@@ -181,7 +177,7 @@ class ScoutNode:
             if len(query.split()) > 3:
                 shorter = " ".join(query.split()[:3])
                 with DDGS() as ddgs:
-                    for i, result in enumerate(ddgs.text(shorter, max_results=self._DDG_MAX_RESULTS)):
+                    for i, result in enumerate(ddgs.text(shorter, max_results=SCOUT_DDG_MAX_RESULTS)):
                         body = result.get("body", "").strip()
                         if body:
                             snippets.append(f"[{i+1}] {result.get('title', '')}\n{body}")
@@ -206,7 +202,7 @@ class ScoutNode:
                     source_bucket=article.source_bucket,
                     source_name=article.source_name,
                     title=article.title,
-                    summary=article.summary or (article.content[:300] if article.content else ""),
+                    summary=article.summary or (article.content[:SCOUT_SUMMARY_MAX_CHARS] if article.content else ""),
                     url=article.url,
                     timestamp=article.timestamp,
                     ticker_tags=article.ticker_tags,
