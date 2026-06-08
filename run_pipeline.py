@@ -18,6 +18,10 @@ from src.agents.ScoutNode import ScoutNode, ScoutArticle
 from src.agents.ToneAnalystNode import ToneAnalystNode
 from src.agents.ClusterFinder import ClusterFinder
 from src.agents.RegimeAnalystNode import RegimeAnalystNode
+from src.agents.PortfolioManagerNode import (
+    PortfolioManagerNode,
+    route_after_portfolio_manager,
+)
 from src.state import GraphState
 from src.config import (
     WIRE_API_KEY,
@@ -147,6 +151,7 @@ async def main_pipeline() -> List[ScoutArticle]:
     state = regime_analyst.run_regime_analyst_node(state)
     significant_count = 0
 
+    portfolio_recommendation = None
     if state["proceed_to_portfolio_manager"]:
         print("\n  🚨 REGIME CHANGE DETECTED! → routing to Portfolio Manager (Agent 3)")
         print("  📋 Saving significant articles for later analysis...")
@@ -155,6 +160,24 @@ async def main_pipeline() -> List[ScoutArticle]:
             signed_articles=enriched_articles,
             regime_analysis=state["regime_analysis"],
         )
+
+        # ── Agent 3: Portfolio Manager (Researcher + Book Runner) ──
+        print("\n" + "=" * 60)
+        print("💼 Portfolio Manager (Agent 3) — Researcher + Book Runner")
+        print("=" * 60)
+        portfolio_manager = PortfolioManagerNode()
+        state = portfolio_manager.run_portfolio_manager_node(state)
+        portfolio_recommendation = state.get("portfolio_recommendation")
+
+        # Conditional routing for the LangGraph edge (documented even though
+        # Agent 4 doesn't exist yet — the routing function is the canonical
+        # graph-wiring contract).
+        next_hop = route_after_portfolio_manager(state)
+        if next_hop == "risk_reviewer":
+            print("\n  → Next hop would be Agent 4 (Risk Reviewer) — not yet implemented.")
+            print("     The PortfolioRecommendation above is the final output of this run.")
+        else:
+            print("\n  🟡 No-trade signal from Portfolio Manager — graph ends here.")
     else:
         print("\n  ✅ No regime change — graph execution ends here.")
 

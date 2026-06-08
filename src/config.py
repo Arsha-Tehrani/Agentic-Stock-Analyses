@@ -21,6 +21,7 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")  # Global fall
 SCOUT_GEMINI_MODEL = os.environ.get("SCOUT_GEMINI_MODEL", GEMINI_MODEL)
 TONALITY_GEMINI_MODEL = os.environ.get("TONALITY_GEMINI_MODEL", GEMINI_MODEL)
 REGIME_GEMINI_MODEL = os.environ.get("REGIME_GEMINI_MODEL", GEMINI_MODEL)
+PORTFOLIO_GEMINI_MODEL = os.environ.get("PORTFOLIO_GEMINI_MODEL", GEMINI_MODEL)
 
 # =============================================================================
 # ScoutNode – Enrichment Engine
@@ -220,3 +221,26 @@ REGIME_DEFAULT_MARKET_STATE = {
 # =============================================================================
 IMPORTANCE_HIGH_THRESHOLD = 0.7      # Articles with score ≥ this are "high importance"
 DISPARITY_HIGH_THRESHOLD = 0.35      # Articles with disparity ≥ this are "high disparity"
+
+# =============================================================================
+# Portfolio Manager – Agent 3 (Optimizer & Execution Strategist)
+# =============================================================================
+# Researcher chain: needs creative proxy discovery → higher temperature.
+# Allocator chain:  needs deterministic portfolio math → lower temperature.
+PORTFOLIO_RESEARCHER_TEMPERATURE = 0.4
+PORTFOLIO_RESEARCHER_MAX_TOKENS = 600
+PORTFOLIO_ALLOCATOR_TEMPERATURE = 0.15
+PORTFOLIO_ALLOCATOR_MAX_TOKENS = 1000
+
+# DuckDuckGo (ddgs) execution parameters for the Researcher
+PORTFOLIO_DDG_MAX_RESULTS = 5        # Snippets per query
+PORTFOLIO_DDG_QUERIES = 4            # Number of web queries the LLM is asked to formulate
+
+# Action-validity constraints enforced by the Allocator validator
+PORTFOLIO_MAX_PROPOSED_ACTIONS = 8   # Cap to prevent runaway trade lists
+PORTFOLIO_VALID_ACTIONS = {"EXPAND", "DILUTE", "ADD"}
+PORTFOLIO_VALID_HORIZONS = {"SHORT_TERM_MOMENTUM", "LONG_TERM_HOLD"}
+
+# Finnhub enrichment base URL (reuses WIRE_API_KEY above)
+PORTFOLIO_FINNHUB_BASE = "https://finnhub.io/api/v1"
+PORTFOLIO_FINNHUB_TIMEOUT = 10       # seconds per request

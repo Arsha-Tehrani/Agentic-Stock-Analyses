@@ -119,6 +119,9 @@ class GraphState(TypedDict, total=False):
     # Final routing decision
     proceed_to_portfolio_manager: bool
 
+    # Portfolio Manager output (Agent 3)
+    portfolio_recommendation: Optional["PortfolioRecommendation"]
+
 
 # =============================================================================
 # Portfolio State — Mutable portfolio management data structure
@@ -365,3 +368,115 @@ class PortfolioState:
         for name, sector in self.portfolio_allocations.sectors.items():
             lines.append(f"    {name}: {sector.weight_percent:.1f}% ({len(sector.holdings)} holdings)")
         return "\n".join(lines)
+
+
+# =============================================================================
+# Portfolio Manager — Agent 3 data structures
+# =============================================================================
+
+
+@dataclass
+class TargetStock:
+    """
+    One target stock surfaced by the Researcher's proxy-hunt / momentum scan.
+
+    role: how this stock relates to the incoming news flow:
+        - "HEADLINE"   → the actual ticker named in the article(s)
+        - "PROXY"      → discovered substitute that offers cheaper/safer exposure
+        - "COMPETITOR" → direct peer to the headline ticker
+        - "SUPPLIER"   → upstream beneficiary in the value chain
+    momentum_flag: True when valuation looks rich but the LLM flagged strong
+        institutional money flow / earnings momentum worth riding tactically.
+    """
+
+    ticker: str
+    company_name: str
+    role: str                              # HEADLINE | PROXY | COMPETITOR | SUPPLIER
+    momentum_flag: bool = False
+    valuation_thesis: str = ""
+    momentum_thesis: str = ""
+    evidence: List[str] = field(default_factory=list)
+    market_cap: Optional[float] = None    # Populated by Finnhub enrichment (aiohttp)
+    current_price: Optional[float] = None  # Populated by Finnhub enrichment (aiohttp)
+
+
+@dataclass
+class TargetResearchList:
+    """
+    Step-1 output of the Portfolio Manager: the researcher's annotated watchlist.
+    """
+
+    targets: List[TargetStock] = field(default_factory=list)
+    queries_used: List[str] = field(default_factory=list)
+    research_summary: str = ""
+
+    def ticker_set(self) -> set:
+        """Convenience: the set of all tickers surfaced."""
+        return {t.ticker.upper() for t in self.targets}
+
+
+@dataclass
+class ProposedAction:
+    """
+    A single executable instruction emitted by the Book Runner (Step 2).
+
+    Action vocabulary:
+        - "EXPAND"  → increase the existing position (sector weight goes up)
+        - "DILUTE"  → reduce the existing position to free up cash
+        - "ADD"     → open a brand-new position not currently held
+    Time_Horizon vocabulary:
+        - "SHORT_TERM_MOMENTUM" → tactical ride; expects to exit quickly
+        - "LONG_TERM_HOLD"      → structural thesis; not time-sensitive
+    """
+
+    ticker: str
+    action: str
+    time_horizon: str
+    reasoning: str
+
+
+@dataclass
+class PortfolioRecommendation:
+    """
+    The strict, schema-locked final output of the Portfolio Manager node.
+    This object is what routes to Agent 4 (The Risk Reviewer).
+    """
+
+    # Narrative analyses (Step 2 LLM)
+    Portfolio_Impact_Assessment: str
+    Abstract_Proxy_Discoveries: str
+    Momentum_vs_Valuation_Analysis: str
+
+    # The actual trade list (Step 2 LLM, validated by Python)
+    Proposed_Actions: List[ProposedAction] = field(default_factory=list)
+
+    # Routing
+    proceed_to_risk_reviewer: bool = True
+
+    # Audit metadata
+    regime_significance_score: int = 0
+    research_summary: str = ""
+    queries_used: List[str] = field(default_factory=list)
+    generated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_dict(self) -> dict:
+        """JSON-serializable view of the recommendation (used for logging / DB)."""
+        return {
+            "Portfolio_Impact_Assessment": self.Portfolio_Impact_Assessment,
+            "Abstract_Proxy_Discoveries": self.Abstract_Proxy_Discoveries,
+            "Momentum_vs_Valuation_Analysis": self.Momentum_vs_Valuation_Analysis,
+            "Proposed_Actions": [
+                {
+                    "Ticker": a.ticker,
+                    "Action": a.action,
+                    "Time_Horizon": a.time_horizon,
+                    "Reasoning": a.reasoning,
+                }
+                for a in self.Proposed_Actions
+            ],
+            "proceed_to_risk_reviewer": self.proceed_to_risk_reviewer,
+            "regime_significance_score": self.regime_significance_score,
+            "research_summary": self.research_summary,
+            "queries_used": self.queries_used,
+            "generated_at": self.generated_at,
+        }

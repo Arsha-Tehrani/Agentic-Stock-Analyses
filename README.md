@@ -35,8 +35,12 @@ Regional ──> RSS ───────────┘       │
               significant_articles    ✅ No regime change
               table (full metrics)    (graph ends)
                         │
-                        ▼
-              Portfolio Manager (Agent 3 — coming soon)
+                         ▼
+              Portfolio Manager (Agent 3)
+              ├── Step 1: Quant Researcher (DDG search + LLM synthesis)
+              │   └── Target_Research_List (HEADLINE / PROXY / COMPETITOR / SUPPLIER)
+              └── Step 2: Book Runner (LLM allocation + Python validator)
+                  └── PortfolioRecommendation (strict JSON) → Agent 4 (Risk Reviewer)
 ```
 
 ## Quick Start
@@ -86,6 +90,67 @@ Capital rotation and macro regime detector (Agent 2) — a strict quantitative g
 - **Python computes** weighted Significance Score: `S = αM + βR + γE` (where α=0.35, β=0.40, γ=0.25, configurable)
 - **Conditional routing**: Score > 70 → saves to `significant_articles` table → routes to Portfolio Manager (Agent 3). Score ≤ 70 → graph ends.
 
+### PortfolioManagerNode (`src/agents/PortfolioManagerNode.py`)
+The Optimizer & Execution Strategist (Agent 3) — invoked whenever the Regime Analyst's `Significance_Score > 70`. Implemented as **two sequential LLM chains** within a single node, because combining abstract proxy research with portfolio mathematics exceeds the cognitive load of a single LLM call.
+
+#### Step 1 — The Quant Researcher (Abstract Discovery & Proxy Hunting)
+Handles "second-order thinking": looks beyond the headline ticker to the supply chain, competitors, and historical precedents.
+1. Receives the **Significant_Regime_Payload** from Agent 2 and the **Current_Market_State** JSON.
+2. Calls the LLM to formulate **3-4 targeted DuckDuckGo queries** (suppliers, competitors, historical patterns, proxy stocks).
+3. Executes those queries via the `ddgs` library and aggregates snippets.
+4. **Optionally enriches** every target with live market cap + price from Finnhub (`aiohttp`, parallel fetches via `asyncio.gather`).
+5. Calls the LLM a second time to synthesize the snippets into a structured `Target_Research_List`.
+
+Each target is classified as:
+- `HEADLINE` — the ticker named in the news
+- `PROXY` — a substitute offering cheaper / safer exposure
+- `COMPETITOR` — a direct peer
+- `SUPPLIER` — an upstream beneficiary in the value chain
+
+Each target also gets a `momentum_flag` indicating whether it's a tactical momentum ride vs. a pure value play, plus per-target `valuation_thesis`, `momentum_thesis`, and `evidence` snippets.
+
+**Output**: `TargetResearchList { targets[], queries_used[], research_summary }`
+
+#### Step 2 — The Book Runner (Allocation & Risk Management)
+Takes the `Target_Research_List` and the `Current_Market_State` and decides what actually gets bought, sold, or trimmed.
+1. Single LLM call emits the **strict JSON trade plan** with the schema:
+   ```json
+   {
+     "Portfolio_Impact_Assessment": "...",
+     "Abstract_Proxy_Discoveries": "...",
+     "Momentum_vs_Valuation_Analysis": "...",
+     "Proposed_Actions": [
+       {
+         "Ticker": "AAPL",
+         "Action": "EXPAND | DILUTE | ADD",
+         "Time_Horizon": "SHORT_TERM_MOMENTUM | LONG_TERM_HOLD",
+         "Reasoning": "Highly detailed justification..."
+       }
+     ]
+   }
+   ```
+2. **Python validator** enforces the schema:
+   - `Action` ∈ {`EXPAND`, `DILUTE`, `ADD`} (invalid → dropped)
+   - `Time_Horizon` ∈ {`SHORT_TERM_MOMENTUM`, `LONG_TERM_HOLD`} (invalid → `LONG_TERM_HOLD`)
+   - Ticker must exist in either the research list or the current portfolio
+   - Caps the action list at `PORTFOLIO_MAX_PROPOSED_ACTIONS` (default 8)
+   - Deduplicates `(ticker, action)` tuples
+   - Pads short reasoning to 30+ words
+
+**Output**: `PortfolioRecommendation` — routes to Agent 4 (The Risk Reviewer) via the `route_after_portfolio_manager` conditional edge.
+
+#### Routing
+```python
+def route_after_portfolio_manager(state) -> str:
+    # returns "risk_reviewer" if recommendation has actions
+    # returns "__end__" otherwise (no-trade signal)
+```
+
+#### Failure Modes (no LLM / no API)
+- **No Gemini key**: falls back to a heuristic Researcher that surfaces only the `ticker_tags` already present in articles, marked as `HEADLINE` role. Allocator emits a conservative no-trade recommendation.
+- **No Finnhub key**: skips live enrichment; `market_cap` / `current_price` stay `None` on each target.
+- **LLM call failure**: caught and converted to a `_fallback_recommendation` that leaves `Proposed_Actions` empty and routes to `__end__`.
+
 ## Configuration
 
 All tunable constants live in **[`src/config.py`](src/config.py)** — the single source of truth:
@@ -111,6 +176,16 @@ All tunable constants live in **[`src/config.py`](src/config.py)** — the singl
 | | `REGIME_SIGNIFICANCE_THRESHOLD` | `70` | Score > this triggers Agent 3 |
 | | `REGIME_LLM_TEMPERATURE` | `0.15` | LLM temperature for regime analysis |
 | | `REGIME_LLM_MAX_TOKENS` | `600` | Max response tokens |
+| **Portfolio Manager** | `PORTFOLIO_RESEARCHER_TEMPERATURE` | `0.4` | Researcher LLM temp (creative proxy hunt) |
+| | `PORTFOLIO_RESEARCHER_MAX_TOKENS` | `600` | Researcher max output tokens |
+| | `PORTFOLIO_ALLOCATOR_TEMPERATURE` | `0.15` | Allocator LLM temp (deterministic math) |
+| | `PORTFOLIO_ALLOCATOR_MAX_TOKENS` | `1000` | Allocator max output tokens |
+| | `PORTFOLIO_DDG_MAX_RESULTS` | `5` | DDG snippets per query |
+| | `PORTFOLIO_DDG_QUERIES` | `4` | Number of search queries the LLM formulates |
+| | `PORTFOLIO_MAX_PROPOSED_ACTIONS` | `8` | Cap on validated trade list |
+| | `PORTFOLIO_VALID_ACTIONS` | `{EXPAND, DILUTE, ADD}` | Action vocabulary |
+| | `PORTFOLIO_VALID_HORIZONS` | `{SHORT_TERM_MOMENTUM, LONG_TERM_HOLD}` | Time-horizon vocabulary |
+| | `PORTFOLIO_FINNHUB_TIMEOUT` | `10` | Seconds per Finnhub request |
 | **Pipeline** | `IMPORTANCE_HIGH_THRESHOLD` | `0.7` | Flags "high importance" |
 | | `DISPARITY_HIGH_THRESHOLD` | `0.35` | Flags "high emotional disparity" |
 
@@ -160,12 +235,13 @@ Agentic_Workflow/
     ├── __init__.py
     ├── config.py                # ★ Centralized configuration (all constants)
     ├── NewsArticle.py           # Pydantic validation schema
-    ├── state.py                 # Data classes (ScoutArticle, EmotionalAnalysis, RegimeAnalysis, GraphState)
+    ├── state.py                 # Data classes (ScoutArticle, EmotionalAnalysis, RegimeAnalysis, TargetStock, ProposedAction, PortfolioRecommendation, GraphState)
     ├── agents/
-    │   ├── ScoutNode.py         # Agent 1a: importance scoring + search + aggregation
-    │   ├── ToneAnalystNode.py   # Agent 1b: emotional tonality analysis
-    │   ├── ClusterFinder.py     # Agent 1c: related-article clustering
-    │   └── RegimeAnalystNode.py # Agent 2: macro regime & capital rotation detection
+    │   ├── ScoutNode.py            # Agent 1a: importance scoring + search + aggregation
+    │   ├── ToneAnalystNode.py      # Agent 1b: emotional tonality analysis
+    │   ├── ClusterFinder.py        # Agent 1c: related-article clustering
+    │   ├── RegimeAnalystNode.py    # Agent 2: macro regime & capital rotation detection
+    │   └── PortfolioManagerNode.py # Agent 3: Researcher + Book Runner (target discovery + allocation)
     ├── db/
     │   └── DatabaseSink.py      # SQLite persistence + related-article queries + significant_articles persistence
     └── ingestors/
