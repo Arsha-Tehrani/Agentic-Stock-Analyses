@@ -12,10 +12,15 @@ To override API keys, set environment variables before running:
 import os
 
 # =============================================================================
-# LLM / Gemini Configuration (shared by ScoutNode & ToneAnalystNode)
+# LLM / Gemini Configuration
 # =============================================================================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")  # Global fallback
+
+# Per-agent model selection (explicit environment variable names)
+SCOUT_GEMINI_MODEL = os.environ.get("SCOUT_GEMINI_MODEL", GEMINI_MODEL)
+TONALITY_GEMINI_MODEL = os.environ.get("TONALITY_GEMINI_MODEL", GEMINI_MODEL)
+REGIME_GEMINI_MODEL = os.environ.get("REGIME_GEMINI_MODEL", GEMINI_MODEL)
 
 # =============================================================================
 # ScoutNode – Enrichment Engine
@@ -115,7 +120,7 @@ RSS_MAX_PER_FEED = 10        # Regional RSS feed entries per source
 # Regime Analyst – Capital Rotation & Macro Regime Detection
 # =============================================================================
 # LLM temperatures
-REGIME_LLM_TEMPERATURE = 0.15
+REGIME_LLM_TEMPERATURE = 0.15 #How creative or "Conservative" the model is. 0-1. Higher is less conservative
 REGIME_LLM_MAX_TOKENS = 600
 
 # Scoring weights (LLM scores each factor 1-10, code computes weighted S)
@@ -137,6 +142,9 @@ REGIME_DEFAULT_MARKET_STATE = {
     "portfolio_allocations": {
         "total_value": 19091.87,
         "cash_reserves_percent": 32.3,
+        "cash_holdings": [
+            {"ticker": "SPAXX", "concentration_percent": 32.30}
+        ],
         "sectors": {
             "Technology": {
                 "weight_percent": 35.2,
@@ -146,26 +154,62 @@ REGIME_DEFAULT_MARKET_STATE = {
                     "Communication Services",
                     "Quantum Computing",
                 ],
+                "holdings": [
+                    {"ticker": "NVDL", "concentration_percent": 6.99},
+                    {"ticker": "LITE", "concentration_percent": 6.72},
+                    {"ticker": "GOOGL", "concentration_percent": 3.98},
+                    {"ticker": "META", "concentration_percent": 3.31},
+                    {"ticker": "QBTS", "concentration_percent": 2.53},
+                    {"ticker": "NBIS", "concentration_percent": 2.42},
+                    {"ticker": "MSFT", "concentration_percent": 2.36},
+                    {"ticker": "ARTY", "concentration_percent": 1.96},
+                    {"ticker": "STM", "concentration_percent": 1.45},
+                    {"ticker": "ABTC", "concentration_percent": 1.18},
+                    {"ticker": "AXTI", "concentration_percent": 1.08},
+                    {"ticker": "NVTS", "concentration_percent": 0.70},
+                    {"ticker": "SMCI", "concentration_percent": 0.48}
+                ]
             },
             "Healthcare": {
                 "weight_percent": 13.5,
                 "sub_sector_bias": ["Telehealth", "Biotechnology"],
+                "holdings": [
+                    {"ticker": "HIMS", "concentration_percent": 11.64},
+                    {"ticker": "MGNX", "concentration_percent": 1.53},
+                    {"ticker": "HIMZ", "concentration_percent": 0.32}
+                ]
             },
             "Broad_Market": {
                 "weight_percent": 7.3,
                 "sub_sector_bias": ["S&P 500 Index"],
+                "holdings": [
+                    {"ticker": "VOO", "concentration_percent": 7.32}
+                ]
             },
             "Consumer_Discretionary": {
                 "weight_percent": 6.3,
                 "sub_sector_bias": ["Apparel", "Automotive", "Sports Technology"],
+                "holdings": [
+                    {"ticker": "SRAD", "concentration_percent": 3.39},
+                    {"ticker": "NKE", "concentration_percent": 1.69},
+                    {"ticker": "TSLA", "concentration_percent": 1.14},
+                    {"ticker": "TSLQ", "concentration_percent": 0.09}
+                ]
             },
             "Energy": {
                 "weight_percent": 4.3,
                 "sub_sector_bias": ["Uranium", "Nuclear Power"],
+                "holdings": [
+                    {"ticker": "UUUU", "concentration_percent": 2.96},
+                    {"ticker": "SMR", "concentration_percent": 1.33}
+                ]
             },
             "Industrials": {
                 "weight_percent": 1.1,
                 "sub_sector_bias": ["Marine Robotics"],
+                "holdings": [
+                    {"ticker": "KRKNF", "concentration_percent": 1.13}
+                ]
             },
         },
     },

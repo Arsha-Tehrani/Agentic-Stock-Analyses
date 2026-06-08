@@ -29,7 +29,7 @@ from google import genai
 from src.state import ScoutArticle, RegimeAnalysis, GraphState, CurrentMarketState
 from src.config import (
     GEMINI_API_KEY,
-    GEMINI_MODEL,
+    REGIME_GEMINI_MODEL,  # Per-agent model config
     REGIME_LLM_TEMPERATURE,
     REGIME_LLM_MAX_TOKENS,
     REGIME_WEIGHT_MACRO,
@@ -104,7 +104,7 @@ class RegimeAnalystNode:
 
         try:
             response = self._client.models.generate_content(
-                model=GEMINI_MODEL,
+                model=REGIME_GEMINI_MODEL,
                 contents=prompt,
                 config={
                     "temperature": REGIME_LLM_TEMPERATURE,

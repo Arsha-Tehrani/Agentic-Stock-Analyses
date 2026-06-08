@@ -23,7 +23,7 @@ from src.NewsArticle import NewsArticle
 from src.state import ScoutArticle
 from src.config import (
     GEMINI_API_KEY,
-    GEMINI_MODEL,
+    SCOUT_GEMINI_MODEL,  # Per-agent model config
     SCOUT_DDG_MAX_RESULTS,
     SCOUT_SUMMARY_MAX_CHARS,
     SCOUT_IMPORTANCE_TEMPERATURE,
@@ -93,7 +93,7 @@ class ScoutNode:
         )
         try:
             response = self._client.models.generate_content(
-                model=GEMINI_MODEL,
+                model=SCOUT_GEMINI_MODEL,
                 contents=prompt,
                 config={"temperature": SCOUT_IMPORTANCE_TEMPERATURE, "max_output_tokens": SCOUT_IMPORTANCE_MAX_TOKENS},
             )
@@ -144,7 +144,7 @@ class ScoutNode:
         )
         try:
             response = self._client.models.generate_content(
-                model=GEMINI_MODEL, contents=prompt,
+                model=SCOUT_GEMINI_MODEL, contents=prompt,
                 config={"temperature": SCOUT_QUERY_TEMPERATURE, "max_output_tokens": SCOUT_QUERY_MAX_TOKENS},
             )
             query = response.text.strip().strip('"').strip("'")

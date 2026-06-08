@@ -89,6 +89,54 @@ CREATE INDEX IF NOT EXISTS idx_significant_timestamp ON significant_articles(tim
 
 
 -- -------------------------------------------------------------------
+-- Portfolio State — persistent portfolio allocation state
+-- This table stores the current portfolio state that can be updated
+-- by the Portfolio Manager → Reviewer → Human approval workflow.
+-- It's a singleton table (only one row with id=1).
+-- -------------------------------------------------------------------
+DROP TABLE IF EXISTS portfolio_state;
+
+CREATE TABLE IF NOT EXISTS portfolio_state (
+    id                      INTEGER PRIMARY KEY CHECK (id = 1),  -- Singleton row
+    timestamp               TEXT    NOT NULL,                     -- ISO-8601 datetime of state
+    macro_baseline          TEXT    NOT NULL,                     -- JSON object
+    portfolio_allocations   TEXT    NOT NULL,                     -- JSON object (full structure)
+    updated_at              TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_by              TEXT    NOT NULL CHECK (updated_by IN ('human', 'portfolio_manager', 'reviewer', 'system')),
+    version                 INTEGER NOT NULL DEFAULT 1            -- Version number for tracking changes
+);
+
+-- Initialize with a default row if not exists (will be populated by application)
+INSERT OR IGNORE INTO portfolio_state (id, timestamp, macro_baseline, portfolio_allocations, updated_by, version)
+VALUES (1, '2026-05-31T00:00:00', '{}', '{}', 'system', 1);
+
+CREATE INDEX IF NOT EXISTS idx_portfolio_updated_at ON portfolio_state(updated_at DESC);
+
+
+-- -------------------------------------------------------------------
+-- Portfolio State History — tracks all changes to portfolio state
+-- for audit and rollback purposes
+-- -------------------------------------------------------------------
+DROP TABLE IF EXISTS portfolio_state_history;
+
+CREATE TABLE IF NOT EXISTS portfolio_state_history (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_state_id      INTEGER NOT NULL,                       -- FK to portfolio_state.id
+    timestamp               TEXT    NOT NULL,                       -- ISO-8601 datetime of state snapshot
+    macro_baseline          TEXT    NOT NULL,                       -- JSON object
+    portfolio_allocations   TEXT    NOT NULL,                       -- JSON object (full structure)
+    updated_by              TEXT    NOT NULL,                       -- Who made the change
+    reason                  TEXT    DEFAULT '',                     -- Reason for change (e.g., regime change detected)
+    created_at              TEXT    NOT NULL DEFAULT (datetime('now')),
+    
+    FOREIGN KEY (portfolio_state_id) REFERENCES portfolio_state(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_portfolio_history_created_at ON portfolio_state_history(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_portfolio_history_state_id ON portfolio_state_history(portfolio_state_id);
+
+
+-- -------------------------------------------------------------------
 -- INSERT statement (used by DatabaseSink.py via parameterised query)
 -- -------------------------------------------------------------------
 -- INSERT INTO articles

@@ -22,7 +22,7 @@ from google import genai
 from src.state import ScoutArticle, EmotionalAnalysis
 from src.config import (
     GEMINI_API_KEY,
-    GEMINI_MODEL,
+    TONALITY_GEMINI_MODEL,  # Per-agent model config
     DISPARITY_THRESHOLD,
     TONALITY_TEMPERATURE,
     TONALITY_MAX_TOKENS,
@@ -123,7 +123,7 @@ class ToneAnalystNode:
 
         try:
             response = self._client.models.generate_content(
-                model=GEMINI_MODEL,
+                model=TONALITY_GEMINI_MODEL,
                 contents=prompt,
                 config={"temperature": TONALITY_TEMPERATURE, "max_output_tokens": TONALITY_MAX_TOKENS},
             )

@@ -118,3 +118,250 @@ class GraphState(TypedDict, total=False):
 
     # Final routing decision
     proceed_to_portfolio_manager: bool
+
+
+# =============================================================================
+# Portfolio State — Mutable portfolio management data structure
+# =============================================================================
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, List, Any, Optional
+import json
+
+
+@dataclass
+class CashHolding:
+    """Represents a cash holding (e.g., money market fund)."""
+    ticker: str
+    concentration_percent: float
+
+    def to_dict(self) -> dict:
+        return {"ticker": self.ticker, "concentration_percent": self.concentration_percent}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CashHolding":
+        return cls(
+            ticker=data["ticker"],
+            concentration_percent=data["concentration_percent"]
+        )
+
+
+@dataclass
+class Position:
+    """Represents a single position/holding in a sector."""
+    ticker: str
+    concentration_percent: float
+
+    def to_dict(self) -> dict:
+        return {"ticker": self.ticker, "concentration_percent": self.concentration_percent}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Position":
+        return cls(
+            ticker=data["ticker"],
+            concentration_percent=data["concentration_percent"]
+        )
+
+
+@dataclass
+class SectorAllocation:
+    """Represents a sector allocation with its holdings."""
+    weight_percent: float
+    sub_sector_bias: List[str] = field(default_factory=list)
+    holdings: List[Position] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "weight_percent": self.weight_percent,
+            "sub_sector_bias": self.sub_sector_bias,
+            "holdings": [h.to_dict() for h in self.holdings]
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SectorAllocation":
+        return cls(
+            weight_percent=data["weight_percent"],
+            sub_sector_bias=data.get("sub_sector_bias", []),
+            holdings=[Position.from_dict(h) for h in data.get("holdings", [])]
+        )
+
+
+@dataclass
+class PortfolioAllocations:
+    """Represents the full portfolio allocation structure."""
+    total_value: float
+    cash_reserves_percent: float
+    cash_holdings: List[CashHolding] = field(default_factory=list)
+    sectors: Dict[str, SectorAllocation] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "total_value": self.total_value,
+            "cash_reserves_percent": self.cash_reserves_percent,
+            "cash_holdings": [h.to_dict() for h in self.cash_holdings],
+            "sectors": {k: v.to_dict() for k, v in self.sectors.items()}
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PortfolioAllocations":
+        return cls(
+            total_value=data["total_value"],
+            cash_reserves_percent=data["cash_reserves_percent"],
+            cash_holdings=[CashHolding.from_dict(h) for h in data.get("cash_holdings", [])],
+            sectors={k: SectorAllocation.from_dict(v) for k, v in data.get("sectors", {}).items()}
+        )
+
+
+@dataclass
+class MacroBaseline:
+    """Represents the macroeconomic baseline."""
+    interest_rate_trend: str
+    inflation_trend: str
+    market_regime: str
+
+    def to_dict(self) -> dict:
+        return {
+            "interest_rate_trend": self.interest_rate_trend,
+            "inflation_trend": self.inflation_trend,
+            "market_regime": self.market_regime
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MacroBaseline":
+        return cls(
+            interest_rate_trend=data["interest_rate_trend"],
+            inflation_trend=data["inflation_trend"],
+            market_regime=data["market_regime"]
+        )
+
+
+@dataclass
+class PortfolioState:
+    """
+    Mutable portfolio state that can be altered and persisted.
+    This is the canonical representation of the current portfolio
+    that flows through the pipeline and can be updated by the
+    Portfolio Manager → Reviewer → Human approval workflow.
+    """
+
+    timestamp: str
+    macro_baseline: MacroBaseline
+    portfolio_allocations: PortfolioAllocations
+    version: int = 1
+    updated_by: str = "system"  # 'human', 'portfolio_manager', 'reviewer', 'system'
+    last_updated: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization / database storage."""
+        return {
+            "timestamp": self.timestamp,
+            "macro_baseline": self.macro_baseline.to_dict(),
+            "portfolio_allocations": self.portfolio_allocations.to_dict(),
+            "version": self.version,
+            "updated_by": self.updated_by,
+            "last_updated": self.last_updated
+        }
+
+    def to_market_state(self) -> CurrentMarketState:
+        """Convert to CurrentMarketState TypedDict for compatibility with existing code."""
+        return {
+            "timestamp": self.timestamp,
+            "macro_baseline": self.macro_baseline.to_dict(),
+            "portfolio_allocations": self.portfolio_allocations.to_dict()
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PortfolioState":
+        """Create from dictionary (e.g., from database or config)."""
+        return cls(
+            timestamp=data["timestamp"],
+            macro_baseline=MacroBaseline.from_dict(data["macro_baseline"]),
+            portfolio_allocations=PortfolioAllocations.from_dict(data["portfolio_allocations"]),
+            version=data.get("version", 1),
+            updated_by=data.get("updated_by", "system"),
+            last_updated=data.get("last_updated", datetime.now().isoformat())
+        )
+
+    @classmethod
+    def from_market_state(cls, market_state: CurrentMarketState, version: int = 1, updated_by: str = "system") -> "PortfolioState":
+        """Create from a CurrentMarketState TypedDict."""
+        return cls(
+            timestamp=market_state["timestamp"],
+            macro_baseline=MacroBaseline.from_dict(market_state["macro_baseline"]),
+            portfolio_allocations=PortfolioAllocations.from_dict(market_state["portfolio_allocations"]),
+            version=version,
+            updated_by=updated_by,
+            last_updated=datetime.now().isoformat()
+        )
+
+    def update_allocations(self, new_allocations: dict, updated_by: str) -> "PortfolioState":
+        """
+        Create a new PortfolioState with updated allocations.
+        This is immutable - returns a new instance with incremented version.
+        """
+        new_allocs = PortfolioAllocations.from_dict(new_allocations)
+        return PortfolioState(
+            timestamp=self.timestamp,
+            macro_baseline=self.macro_baseline,
+            portfolio_allocations=new_allocs,
+            version=self.version + 1,
+            updated_by=updated_by,
+            last_updated=datetime.now().isoformat()
+        )
+
+    def update_macro_baseline(self, new_baseline: dict, updated_by: str) -> "PortfolioState":
+        """
+        Create a new PortfolioState with updated macro baseline.
+        This is immutable - returns a new instance with incremented version.
+        """
+        new_macro = MacroBaseline.from_dict(new_baseline)
+        return PortfolioState(
+            timestamp=datetime.now().strftime("%Y-%m-%d"),
+            macro_baseline=new_macro,
+            portfolio_allocations=self.portfolio_allocations,
+            version=self.version + 1,
+            updated_by=updated_by,
+            last_updated=datetime.now().isoformat()
+        )
+
+    def get_total_sector_weight(self) -> float:
+        """Calculate total sector weight percentage."""
+        return sum(s.weight_percent for s in self.portfolio_allocations.sectors.values())
+
+    def get_cash_weight(self) -> float:
+        """Get cash reserves percentage."""
+        return self.portfolio_allocations.cash_reserves_percent
+
+    def validate(self) -> List[str]:
+        """
+        Validate the portfolio state.
+        Returns list of validation errors (empty if valid).
+        """
+        errors = []
+        total = self.get_total_sector_weight() + self.get_cash_weight()
+        if abs(total - 100.0) > 0.01:
+            errors.append(f"Total allocation is {total:.2f}%, expected 100%")
+
+        # Check sector holdings sum to sector weight
+        for sector_name, sector in self.portfolio_allocations.sectors.items():
+            holdings_sum = sum(h.concentration_percent for h in sector.holdings)
+            if abs(holdings_sum - sector.weight_percent) > 0.01:
+                errors.append(
+                    f"Sector '{sector_name}': holdings sum to {holdings_sum:.2f}%, "
+                    f"but sector weight is {sector.weight_percent}%"
+                )
+
+        return errors
+
+    def __str__(self) -> str:
+        """Human-readable string representation."""
+        lines = [
+            f"Portfolio State (v{self.version}) - {self.timestamp}",
+            f"  Macro Regime: {self.macro_baseline.market_regime}",
+            f"  Cash: {self.get_cash_weight():.1f}%",
+            f"  Sectors: {self.get_total_sector_weight():.1f}%",
+        ]
+        for name, sector in self.portfolio_allocations.sectors.items():
+            lines.append(f"    {name}: {sector.weight_percent:.1f}% ({len(sector.holdings)} holdings)")
+        return "\n".join(lines)

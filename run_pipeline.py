@@ -25,7 +25,9 @@ from src.config import (
     REGIONAL_FEEDS,
     IMPORTANCE_HIGH_THRESHOLD,
     DISPARITY_HIGH_THRESHOLD,
+    REGIME_DEFAULT_MARKET_STATE,
 )
+from src.state import PortfolioState
 
 
 async def main_pipeline() -> List[ScoutArticle]:
@@ -113,6 +115,24 @@ async def main_pipeline() -> List[ScoutArticle]:
 
     rows_inserted = db_sink.insert_articles(db_articles)
 
+    # ── Load portfolio state from database (or initialize from config) ──
+    print("\n" + "=" * 60)
+    print("📊 Loading portfolio state from database...")
+    print("=" * 60)
+
+    db_sink = DatabaseSink()
+    db_sink.initialize_portfolio_state(REGIME_DEFAULT_MARKET_STATE)
+    portfolio_state_dict = db_sink.load_portfolio_state()
+    if portfolio_state_dict:
+        portfolio_state = PortfolioState.from_dict(portfolio_state_dict)
+        print(f"  📦 Loaded portfolio state (v{portfolio_state.version}) from {portfolio_state.timestamp}")
+        print(f"     Updated by: {portfolio_state.updated_by}")
+        print(f"     Macro regime: {portfolio_state.macro_baseline.market_regime}")
+    else:
+        portfolio_state = PortfolioState.from_dict(REGIME_DEFAULT_MARKET_STATE)
+        print("  ⚠️  No portfolio state in DB, using config defaults")
+
+    # ── Regime Analyst ──
     print("\n" + "=" * 60)
     print("🏛️  Regime Analyst — detecting macro shifts & capital rotation...")
     print("=" * 60)
@@ -120,7 +140,7 @@ async def main_pipeline() -> List[ScoutArticle]:
     regime_analyst = RegimeAnalystNode()
     state: GraphState = {
         "articles": enriched_articles,
-        "market_state": {},
+        "market_state": portfolio_state.to_market_state(),
         "regime_analysis": None,
         "proceed_to_portfolio_manager": False,
     }

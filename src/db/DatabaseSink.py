@@ -323,3 +323,184 @@ class DatabaseSink:
             return [dict(row) for row in rows]
         finally:
             conn.close()
+
+    # ========================================================================
+    # Portfolio State Persistence
+    # ========================================================================
+
+    def save_portfolio_state(
+        self,
+        state_dict: dict,
+        updated_by: str,
+        reason: str = "",
+    ) -> int:
+        """
+        Save the current portfolio state to the database.
+        This updates the singleton row in portfolio_state and archives
+        the previous state to portfolio_state_history.
+
+        Args:
+            state_dict: Dictionary representation of PortfolioState
+            updated_by: Who made the change ('human', 'portfolio_manager', 'reviewer', 'system')
+            reason: Optional reason for the change (for audit trail)
+
+        Returns:
+            Number of rows affected (should be 1)
+        """
+        import json
+        from datetime import datetime
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            # Get current version for history archival
+            current = conn.execute(
+                "SELECT id, timestamp, macro_baseline, portfolio_allocations, version "
+                "FROM portfolio_state WHERE id = 1"
+            ).fetchone()
+
+            if current:
+                # Archive current state to history before updating
+                conn.execute(
+                    "INSERT INTO portfolio_state_history "
+                    "(portfolio_state_id, timestamp, macro_baseline, portfolio_allocations, updated_by, reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        1,
+                        current["timestamp"],
+                        current["macro_baseline"],
+                        current["portfolio_allocations"],
+                        current.get("updated_by", "system"),
+                        reason or "Scheduled update",
+                    ),
+                )
+                new_version = current["version"] + 1
+            else:
+                new_version = 1
+
+            # Update the singleton portfolio_state row
+            now = datetime.now().isoformat()
+            conn.execute(
+                "INSERT OR REPLACE INTO portfolio_state "
+                "(id, timestamp, macro_baseline, portfolio_allocations, updated_by, version) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    1,
+                    state_dict["timestamp"],
+                    json.dumps(state_dict["macro_baseline"]),
+                    json.dumps(state_dict["portfolio_allocations"]),
+                    updated_by,
+                    new_version,
+                ),
+            )
+            conn.commit()
+            print(f"  💾 Portfolio state saved (v{new_version}) by {updated_by}")
+            return new_version
+        finally:
+            conn.close()
+
+    def load_portfolio_state(self) -> Optional[dict]:
+        """
+        Load the current portfolio state from the database.
+
+        Returns:
+            Dictionary with portfolio state data, or None if not found.
+            The dict has keys: timestamp, macro_baseline, portfolio_allocations, version, updated_by
+        """
+        import json
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT * FROM portfolio_state WHERE id = 1"
+            ).fetchone()
+
+            if not row:
+                return None
+
+            return {
+                "timestamp": row["timestamp"],
+                "macro_baseline": json.loads(row["macro_baseline"]),
+                "portfolio_allocations": json.loads(row["portfolio_allocations"]),
+                "version": row["version"],
+                "updated_by": row["updated_by"],
+            }
+        finally:
+            conn.close()
+
+    def get_portfolio_state_history(
+        self, limit: int = 20
+    ) -> List[dict]:
+        """
+        Fetch portfolio state history for audit purposes.
+
+        Args:
+            limit: Maximum number of historical records to return
+
+        Returns:
+            List of historical portfolio state records, ordered by most recent first
+        """
+        import json
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT * FROM portfolio_state_history "
+                "ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+
+            results = []
+            for row in rows:
+                results.append({
+                    "id": row["id"],
+                    "portfolio_state_id": row["portfolio_state_id"],
+                    "timestamp": row["timestamp"],
+                    "macro_baseline": json.loads(row["macro_baseline"]),
+                    "portfolio_allocations": json.loads(row["portfolio_allocations"]),
+                    "updated_by": row["updated_by"],
+                    "reason": row["reason"],
+                    "created_at": row["created_at"],
+                })
+            return results
+        finally:
+            conn.close()
+
+    def initialize_portfolio_state(self, default_state: dict) -> bool:
+        """
+        Initialize the portfolio state with a default if it doesn't exist.
+        This is useful for first-time setup.
+
+        Args:
+            default_state: Default portfolio state dictionary from config
+
+        Returns:
+            True if initialized, False if already existed
+        """
+        existing = self.load_portfolio_state()
+        if existing:
+            return False
+
+        from datetime import datetime
+        import json
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO portfolio_state "
+                "(id, timestamp, macro_baseline, portfolio_allocations, updated_by, version) "
+                "VALUES (1, ?, ?, ?, ?, ?)",
+                (
+                    default_state["timestamp"],
+                    json.dumps(default_state["macro_baseline"]),
+                    json.dumps(default_state["portfolio_allocations"]),
+                    "system",
+                    1,
+                ),
+            )
+            conn.commit()
+            print(f"  📦 Portfolio state initialized from config defaults")
+            return True
+        finally:
+            conn.close()
