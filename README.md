@@ -151,6 +151,48 @@ def route_after_portfolio_manager(state) -> str:
 - **No Finnhub key**: skips live enrichment; `market_cap` / `current_price` stay `None` on each target.
 - **LLM call failure**: caught and converted to a `_fallback_recommendation` that leaves `Proposed_Actions` empty and routes to `__end__`.
 
+### RiskReviewerNode (`src/agents/RiskReviewerNode.py`)
+The Critic (Agent 4) — invoked by `route_after_portfolio_manager` whenever Agent 3 emits a `PortfolioRecommendation` with `Proposed_Actions`. Performs a **Dual-Check Evaluation** with **VETO POWER**:
+
+**1. OPTIMIZATION CHECK**
+- Did the PM capitalize on the regime shift via SMART PROXIES (cheaper, purer, less obvious exposure) — or did it just chase the obvious overvalued headline?
+- Are the proposed actions internally consistent (no EXPAND + DILUTE on the same ticker; every ADD funded by a DILUTE)?
+- Is the funding logic sound? Are the time horizons appropriate for the catalyst?
+
+**2. FLAW DETECTION**
+- Scans the original news payload for **contradictory articles** that invalidate the PM's thesis (macro headwinds, rate fears, negative earnings, regulatory action).
+- Looks for **liquidity traps** (low-float names, momentum rides that will reverse on a 5% down-day).
+- Checks for **concentration risk** (sector overweight above tolerance).
+- Verifies TIME_HORIZON matches the catalyst.
+
+**Output schema** (strict):
+```json
+{
+  "optimization_verdict": "1-3 sentence verdict on proxy selection and consistency.",
+  "risk_flaw_analysis":  "1-3 sentence identification of missed risks / contradictions / concentration.",
+  "approval_status":     true | false,
+  "critic_feedback":      "EMPTY if approved; specific, actionable, named-ticker fix instructions if rejected (≥30 chars)."
+}
+```
+
+**Routing**
+```python
+def route_after_risk_reviewer(state) -> str:
+    # approved                → "output_reporter"  (Agent 5)
+    # rejected & iter < MAX   → "portfolio_manager" (back to PM for revise)
+    # rejected & iter == MAX  → "__end__"           (hard cap)
+```
+
+**Revision loop (Option B — in-place revise)**
+When the critic rejects, the `previous_critic_feedback` is piped back to Agent 3 and `PortfolioManagerNode.revise_recommendation(existing, critic_feedback, ...)` is called. This re-prompts the Book Runner with the prior recommendation + the critic's specific feedback (no fresh DDG / Finnhub work — the existing research is reused). The revised recommendation is then re-validated against the same universe rules.
+
+**Hard cap** — `RISK_REVIEW_MAX_ITERATIONS` (default 3). After the critic and PM disagree 3 times in a row, the loop terminates with `__end__` and a warning is logged. The graph can never get stuck in an infinite disagreement loop.
+
+**Failure Modes (no LLM / no API)**
+- **No Gemini key**: heuristic auto-approves with an explanatory verdict. The human reviewer at the terminal step remains the real Critic in that scenario.
+- **LLM call failure**: caught and converted to a fallback `CriticFeedback(approval_status=True)` so the graph continues.
+- **Max iterations hit**: forces `__end__`; Agent 5 (when built) will surface the loop-exhaustion in its report.
+
 ## Configuration
 
 All tunable constants live in **[`src/config.py`](src/config.py)** — the single source of truth:
@@ -186,6 +228,11 @@ All tunable constants live in **[`src/config.py`](src/config.py)** — the singl
 | | `PORTFOLIO_VALID_ACTIONS` | `{EXPAND, DILUTE, ADD}` | Action vocabulary |
 | | `PORTFOLIO_VALID_HORIZONS` | `{SHORT_TERM_MOMENTUM, LONG_TERM_HOLD}` | Time-horizon vocabulary |
 | | `PORTFOLIO_FINNHUB_TIMEOUT` | `10` | Seconds per Finnhub request |
+| **Risk Reviewer** | `RISK_REVIEWER_TEMPERATURE` | `0.1` | Critic LLM temp (deterministic) |
+| | `RISK_REVIEWER_MAX_TOKENS` | `800` | Critic max output tokens |
+| | `PORTFOLIO_REVISE_TEMPERATURE` | `0.15` | PM-revise LLM temp |
+| | `PORTFOLIO_REVISE_MAX_TOKENS` | `1000` | PM-revise max output tokens |
+| | `RISK_REVIEW_MAX_ITERATIONS` | `3` | Hard cap on PM ↔ Critic disagreements |
 | **Pipeline** | `IMPORTANCE_HIGH_THRESHOLD` | `0.7` | Flags "high importance" |
 | | `DISPARITY_HIGH_THRESHOLD` | `0.35` | Flags "high emotional disparity" |
 
@@ -235,13 +282,14 @@ Agentic_Workflow/
     ├── __init__.py
     ├── config.py                # ★ Centralized configuration (all constants)
     ├── NewsArticle.py           # Pydantic validation schema
-    ├── state.py                 # Data classes (ScoutArticle, EmotionalAnalysis, RegimeAnalysis, TargetStock, ProposedAction, PortfolioRecommendation, GraphState)
+    ├── state.py                 # Data classes (ScoutArticle, EmotionalAnalysis, RegimeAnalysis, TargetStock, ProposedAction, PortfolioRecommendation, CriticFeedback, GraphState)
     ├── agents/
     │   ├── ScoutNode.py            # Agent 1a: importance scoring + search + aggregation
     │   ├── ToneAnalystNode.py      # Agent 1b: emotional tonality analysis
     │   ├── ClusterFinder.py        # Agent 1c: related-article clustering
     │   ├── RegimeAnalystNode.py    # Agent 2: macro regime & capital rotation detection
-    │   └── PortfolioManagerNode.py # Agent 3: Researcher + Book Runner (target discovery + allocation)
+    │   ├── PortfolioManagerNode.py # Agent 3: Researcher + Book Runner (target discovery + allocation)
+    │   └── RiskReviewerNode.py    # Agent 4: Critic (dual-check + revise loop)
     ├── db/
     │   └── DatabaseSink.py      # SQLite persistence + related-article queries + significant_articles persistence
     └── ingestors/

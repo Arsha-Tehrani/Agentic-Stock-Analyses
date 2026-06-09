@@ -18,10 +18,12 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")  # Global fallback
 
 # Per-agent model selection (explicit environment variable names)
-SCOUT_GEMINI_MODEL = os.environ.get("SCOUT_GEMINI_MODEL", GEMINI_MODEL)
-TONALITY_GEMINI_MODEL = os.environ.get("TONALITY_GEMINI_MODEL", GEMINI_MODEL)
-REGIME_GEMINI_MODEL = os.environ.get("REGIME_GEMINI_MODEL", GEMINI_MODEL)
-PORTFOLIO_GEMINI_MODEL = os.environ.get("PORTFOLIO_GEMINI_MODEL", GEMINI_MODEL)
+SCOUT_GEMINI_MODEL = os.environ.get("SCOUT_GEMINI_MODEL", GEMINI_MODEL) #Doer
+TONALITY_GEMINI_MODEL = os.environ.get("TONALITY_GEMINI_MODEL", GEMINI_MODEL) # Slightly thinker model or maybe just light one
+REGIME_GEMINI_MODEL = os.environ.get("REGIME_GEMINI_MODEL", GEMINI_MODEL) #Thinker model
+PORTFOLIO_GEMINI_MODEL = os.environ.get("PORTFOLIO_GEMINI_MODEL", GEMINI_MODEL) #Super Thinker model
+RISK_REVIEWER_GEMINI_MODEL = os.environ.get("RISK_REVIEWER_GEMINI_MODEL", GEMINI_MODEL) #Critic model
+PORTFOLIO_REVISE_GEMINI_MODEL = os.environ.get("PORTFOLIO_REVISE_GEMINI_MODEL", GEMINI_MODEL) #Revise model
 
 # =============================================================================
 # ScoutNode – Enrichment Engine
@@ -244,3 +246,23 @@ PORTFOLIO_VALID_HORIZONS = {"SHORT_TERM_MOMENTUM", "LONG_TERM_HOLD"}
 # Finnhub enrichment base URL (reuses WIRE_API_KEY above)
 PORTFOLIO_FINNHUB_BASE = "https://finnhub.io/api/v1"
 PORTFOLIO_FINNHUB_TIMEOUT = 10       # seconds per request
+
+# =============================================================================
+# Risk Reviewer – Agent 4 (The Critic / Quantitative Gatekeeper)
+# =============================================================================
+# Critic: low temperature, deterministic veto power. Be ruthless.
+RISK_REVIEWER_TEMPERATURE = 0.1
+RISK_REVIEWER_MAX_TOKENS = 800
+
+# PM revise chain (Option B): in-place revision of the existing recommendation
+# given the critic's feedback. Low temperature too — apply the suggested fix.
+PORTFOLIO_REVISE_TEMPERATURE = 0.15
+PORTFOLIO_REVISE_MAX_TOKENS = 1000
+
+# Hard cap on how many times Agent 3 ↔ Agent 4 can disagree before the loop
+# terminates (and the graph ends with the most recent feedback attached).
+RISK_REVIEW_MAX_ITERATIONS = 3
+
+# Hard-rule thresholds the heuristic critic (no-LLM path) uses to auto-veto
+RISK_MAX_SINGLE_POSITION_PCT = 25.0   # any single position > this → veto
+RISK_MAX_SECTOR_PCT = 45.0            # any sector post-trade > this → veto

@@ -21,8 +21,14 @@ from src.agents.RegimeAnalystNode import RegimeAnalystNode
 from src.agents.PortfolioManagerNode import (
     PortfolioManagerNode,
     route_after_portfolio_manager,
+    print_recommendation,
+)
+from src.agents.RiskReviewerNode import (
+    RiskReviewerNode,
+    route_after_risk_reviewer,
 )
 from src.state import GraphState
+from src.config import RISK_REVIEW_MAX_ITERATIONS
 from src.config import (
     WIRE_API_KEY,
     BLOG_TARGETS,
@@ -169,13 +175,40 @@ async def main_pipeline() -> List[ScoutArticle]:
         state = portfolio_manager.run_portfolio_manager_node(state)
         portfolio_recommendation = state.get("portfolio_recommendation")
 
-        # Conditional routing for the LangGraph edge (documented even though
-        # Agent 4 doesn't exist yet — the routing function is the canonical
-        # graph-wiring contract).
+        # ── Agent 4: Risk Reviewer ↔ Agent 3 review loop (Option B) ──
+        # While the critic rejects AND we have iterations left, pipe the
+        # feedback back to the PM for an in-place revise (no fresh DDG /
+        # Finnhub work — just targeted LLM revision).
         next_hop = route_after_portfolio_manager(state)
         if next_hop == "risk_reviewer":
-            print("\n  → Next hop would be Agent 4 (Risk Reviewer) — not yet implemented.")
-            print("     The PortfolioRecommendation above is the final output of this run.")
+            risk_reviewer = RiskReviewerNode()
+            while True:
+                print("\n" + "=" * 60)
+                print("🛡️  Risk Reviewer (Agent 4) — Dual-Check Evaluation")
+                print("=" * 60)
+                state = risk_reviewer.run_risk_reviewer_node(state)
+                hop = route_after_risk_reviewer(state)
+                if hop == "output_reporter":
+                    print("\n  ✅ Critic APPROVED. Routing to Agent 5 "
+                          "(Output Reporter) — not yet implemented; final output follows.")
+                    break
+                if hop == "__end__":
+                    print(f"\n  ⚠️  Reached max iterations "
+                          f"({RISK_REVIEW_MAX_ITERATIONS}); graph ends.")
+                    break
+                # hop == "portfolio_manager" → revise in place
+                prev_fb = state.get("critic_feedback")
+                state["previous_critic_feedback"] = prev_fb
+                existing_rec = state.get("portfolio_recommendation")
+                print("\n  🔄 Re-running Portfolio Manager (revise chain)...")
+                revised_rec = portfolio_manager.revise_recommendation(
+                    existing=existing_rec,
+                    critic_feedback=prev_fb,
+                    market_state=state.get("market_state", REGIME_DEFAULT_MARKET_STATE),
+                    regime_analysis=state.get("regime_analysis"),
+                )
+                state["portfolio_recommendation"] = revised_rec
+                print_recommendation(revised_rec)
         else:
             print("\n  🟡 No-trade signal from Portfolio Manager — graph ends here.")
     else:

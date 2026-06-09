@@ -59,6 +59,7 @@ from src.state import (
     TargetResearchList,
     ProposedAction,
     PortfolioRecommendation,
+    CriticFeedback,
 )
 from src.config import (
     GEMINI_API_KEY,
@@ -74,6 +75,9 @@ from src.config import (
     PORTFOLIO_VALID_HORIZONS,
     PORTFOLIO_FINNHUB_BASE,
     PORTFOLIO_FINNHUB_TIMEOUT,
+    PORTFOLIO_REVISE_GEMINI_MODEL,
+    PORTFOLIO_REVISE_TEMPERATURE,
+    PORTFOLIO_REVISE_MAX_TOKENS,
     WIRE_API_KEY,
     REGIME_DEFAULT_MARKET_STATE,
 )
@@ -705,6 +709,190 @@ class PortfolioManagerNode:
             regime_significance_score=regime_analysis.Significance_Score,
             research_summary=target_list.research_summary,
             queries_used=target_list.queries_used,
+        )
+
+    # ==================================================================
+    # REVISION CHAIN (Option B) — In-place revise driven by Agent 4 feedback
+    # ==================================================================
+
+    def revise_recommendation(
+        self,
+        existing: PortfolioRecommendation,
+        critic_feedback: CriticFeedback,
+        market_state: CurrentMarketState,
+        regime_analysis: RegimeAnalysis,
+    ) -> PortfolioRecommendation:
+        """
+        In-place revision of an existing PortfolioRecommendation given the
+        Risk Reviewer's specific feedback. The Researcher chain is NOT
+        re-run (no fresh DDG / Finnhub calls); only the Book Runner is
+        re-prompted with the prior recommendation + critic's comments.
+
+        Returns a NEW PortfolioRecommendation object that REPLACES the
+        prior one in GraphState. If the LLM is unavailable, returns a
+        heuristic patch that just appends a note to the assessment.
+        """
+        print("\n  💼 Portfolio Manager: REVISING existing recommendation based on "
+              "critic feedback (Option B: in-place revise)...")
+
+        if not self._client:
+            return self._fallback_recommendation(
+                regime_analysis,
+                reason=(
+                    "no Gemini client for revise; preserving prior recommendation"
+                ),
+            )
+
+        prompt = self._build_revise_prompt(
+            existing=existing,
+            critic_feedback=critic_feedback,
+            market_state=market_state,
+            regime_analysis=regime_analysis,
+        )
+
+        try:
+            response = self._client.models.generate_content(
+                model=PORTFOLIO_REVISE_GEMINI_MODEL,
+                contents=prompt,
+                config={
+                    "temperature": PORTFOLIO_REVISE_TEMPERATURE,
+                    "max_output_tokens": PORTFOLIO_REVISE_MAX_TOKENS,
+                },
+            )
+            text = self._strip_code_fences(response.text)
+            data = json.loads(text)
+
+            # Re-validate the proposed actions against the universe
+            # (target_list universe is the prior rec's tickers + portfolio)
+            existing_tickers = [a.ticker for a in existing.Proposed_Actions]
+            fake_target_list = TargetResearchList(
+                targets=[
+                    TargetStock(
+                        ticker=t,
+                        company_name=t,
+                        role="HEADLINE",
+                        valuation_thesis="Inherited from prior recommendation",
+                        momentum_thesis="Inherited from prior recommendation",
+                    )
+                    for t in existing_tickers
+                ],
+                queries_used=existing.queries_used,
+                research_summary=existing.research_summary,
+            )
+            valid_actions = self._validate_proposed_actions(
+                data.get("Proposed_Actions", []),
+                fake_target_list,
+                market_state,
+            )
+
+            revised = PortfolioRecommendation(
+                Portfolio_Impact_Assessment=str(
+                    data.get("Portfolio_Impact_Assessment", existing.Portfolio_Impact_Assessment)
+                ).strip(),
+                Abstract_Proxy_Discoveries=str(
+                    data.get("Abstract_Proxy_Discoveries", existing.Abstract_Proxy_Discoveries)
+                ).strip(),
+                Momentum_vs_Valuation_Analysis=str(
+                    data.get("Momentum_vs_Valuation_Analysis", existing.Momentum_vs_Valuation_Analysis)
+                ).strip(),
+                Proposed_Actions=valid_actions,
+                proceed_to_risk_reviewer=len(valid_actions) > 0,
+                regime_significance_score=existing.regime_significance_score,
+                research_summary=existing.research_summary,
+                queries_used=existing.queries_used,
+            )
+            # Bump the audit trail
+            revised.research_summary = (
+                (existing.research_summary or "")
+                + f"\n[REVISED iter {critic_feedback.iteration} based on critic feedback: "
+                  f"{critic_feedback.critic_feedback[:120]}...]"
+            ).strip()
+            return revised
+
+        except Exception as e:
+            print(f"    ⚠️  Revise chain failed: {e}")
+            return self._fallback_recommendation(
+                regime_analysis, reason=f"revise failed: {e}"
+            )
+
+    def _build_revise_prompt(
+        self,
+        existing: PortfolioRecommendation,
+        critic_feedback: CriticFeedback,
+        market_state: CurrentMarketState,
+        regime_analysis: RegimeAnalysis,
+    ) -> str:
+        # Reuse the same portfolio view as the allocator
+        alloc = market_state.get("portfolio_allocations", {})
+        sectors = alloc.get("sectors", {})
+
+        portfolio_lines = [f"Cash: {alloc.get('cash_reserves_percent', 0)}%",
+                           f"Total Value: ${alloc.get('total_value', 0):,.2f}"]
+        for sname, sdata in sectors.items():
+            portfolio_lines.append(
+                f"  - {sname}: {sdata.get('weight_percent', 0)}% "
+                f"({', '.join(sdata.get('sub_sector_bias', []))})"
+            )
+            for h in sdata.get("holdings", []):
+                portfolio_lines.append(
+                    f"      • {h.get('ticker')}: {h.get('concentration_percent', 0)}%"
+                )
+        portfolio_text = "\n".join(portfolio_lines)
+
+        if existing.Proposed_Actions:
+            prior_actions = "\n".join(
+                f"  [{i}] {a.ticker} {a.action} {a.time_horizon}\n"
+                f"      Reasoning: {a.reasoning}"
+                for i, a in enumerate(existing.Proposed_Actions, 1)
+            )
+        else:
+            prior_actions = "  (no prior actions)"
+
+        return (
+            "You are the senior book-runner at a hedge fund. The Risk Reviewer "
+            "(Agent 4) just REJECTED your previous recommendation and gave you "
+            "specific, actionable feedback. You must REVISE your trade plan in "
+            "place. Do NOT re-run the research — just fix what the critic flagged.\n\n"
+            f"=== REGIME SIGNIFICANCE: {regime_analysis.Significance_Score}/100 ===\n\n"
+            "=== CURRENT PORTFOLIO ===\n"
+            f"{portfolio_text}\n\n"
+            "=== YOUR PRIOR RECOMMENDATION (the one the Critic rejected) ===\n"
+            f"Prior Portfolio_Impact_Assessment: {existing.Portfolio_Impact_Assessment}\n"
+            f"Prior Abstract_Proxy_Discoveries: {existing.Abstract_Proxy_Discoveries}\n"
+            f"Prior Momentum_vs_Valuation_Analysis: {existing.Momentum_vs_Valuation_Analysis}\n"
+            f"Prior Proposed_Actions:\n{prior_actions}\n\n"
+            "=== THE CRITIC'S VERDICT ===\n"
+            f"Optimization verdict: {critic_feedback.optimization_verdict}\n"
+            f"Risk flaw analysis: {critic_feedback.risk_flaw_analysis}\n"
+            f"Critic feedback (WHAT TO FIX):\n"
+            f"  >>> {critic_feedback.critic_feedback}\n\n"
+            "REVISE INSTRUCTIONS:\n"
+            "  1. Apply the critic's specific fix to your prior recommendation.\n"
+            "  2. Keep the parts of your plan that the critic did NOT flag.\n"
+            "  3. Adjust tickers, actions, time_horizons, and reasoning as needed.\n"
+            "  4. Update the three narrative assessments to reflect the changes.\n"
+            f"  5. Cap Proposed_Actions at {PORTFOLIO_MAX_PROPOSED_ACTIONS}.\n\n"
+            "=== REQUIRED JSON SCHEMA (same as the original) ===\n"
+            "{\n"
+            '  "Portfolio_Impact_Assessment": "Updated analysis reflecting the revision.",\n'
+            '  "Abstract_Proxy_Discoveries": "Updated proxy rationale (only change if needed).",\n'
+            '  "Momentum_vs_Valuation_Analysis": "Updated momentum/valuation view.",\n'
+            '  "Proposed_Actions": [\n'
+            '    {\n'
+            '      "Ticker": "Stock Symbol",\n'
+            '      "Action": "EXPAND | DILUTE | ADD",\n'
+            '      "Time_Horizon": "SHORT_TERM_MOMENTUM | LONG_TERM_HOLD",\n'
+            "      \"Reasoning\": \"Detailed justification that explicitly addresses the critic's prior concern.\"\n"
+            '    }\n'
+            '  ]\n'
+            '}\n\n'
+            "STRICT RULES (same as the original allocator):\n"
+            f"- Proposed_Actions length between 1 and {PORTFOLIO_MAX_PROPOSED_ACTIONS}.\n"
+            "- Every Ticker must appear in EITHER the prior Proposed_Actions or the current portfolio.\n"
+            "- Action MUST be EXPAND, DILUTE, or ADD.\n"
+            "- Time_Horizon MUST be SHORT_TERM_MOMENTUM or LONG_TERM_HOLD.\n"
+            "- Reasoning must be at least 30 words and EXPLICITLY address the critic's prior concern.\n"
+            "- Return ONLY the JSON object, no markdown, no preamble."
         )
 
     def _build_allocator_prompt(

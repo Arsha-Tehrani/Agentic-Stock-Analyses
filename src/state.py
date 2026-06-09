@@ -122,6 +122,16 @@ class GraphState(TypedDict, total=False):
     # Portfolio Manager output (Agent 3)
     portfolio_recommendation: Optional["PortfolioRecommendation"]
 
+    # Risk Reviewer output (Agent 4) — most recent critic verdict
+    critic_feedback: Optional["CriticFeedback"]
+
+    # Prior critic feedback piped back into Agent 3 prompt (for revision rounds)
+    previous_critic_feedback: Optional["CriticFeedback"]
+
+    # How many times Agent 3 ↔ Agent 4 have disagreed so far. Hard-capped
+    # by RISK_REVIEW_MAX_ITERATIONS so the graph can never get stuck in a loop.
+    risk_review_iterations: int
+
 
 # =============================================================================
 # Portfolio State — Mutable portfolio management data structure
@@ -478,5 +488,38 @@ class PortfolioRecommendation:
             "regime_significance_score": self.regime_significance_score,
             "research_summary": self.research_summary,
             "queries_used": self.queries_used,
+            "generated_at": self.generated_at,
+        }
+
+
+# =============================================================================
+# Risk Reviewer — Agent 4 data structures
+# =============================================================================
+
+
+@dataclass
+class CriticFeedback:
+    """
+    Output of the Risk Reviewer (Agent 4) — the dual-check critic verdict.
+
+    approval_status=True  → forward to Agent 5 (Output Reporter).
+    approval_status=False → pipe critic_feedback back to Agent 3 for revision.
+    """
+
+    optimization_verdict: str
+    risk_flaw_analysis: str
+    approval_status: bool = False
+    critic_feedback: str = ""   # Empty when approved; specific fix instructions when rejected.
+    iteration: int = 1           # Which round of review this was (1, 2, 3, ...).
+    generated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def to_dict(self) -> dict:
+        """JSON-serializable view (used for logging / piping back to Agent 3)."""
+        return {
+            "optimization_verdict": self.optimization_verdict,
+            "risk_flaw_analysis": self.risk_flaw_analysis,
+            "approval_status": self.approval_status,
+            "critic_feedback": self.critic_feedback,
+            "iteration": self.iteration,
             "generated_at": self.generated_at,
         }
