@@ -18,12 +18,12 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")  # Global fallback
 
 # Per-agent model selection (explicit environment variable names)
-SCOUT_GEMINI_MODEL = os.environ.get("SCOUT_GEMINI_MODEL", GEMINI_MODEL) #Doer
-TONALITY_GEMINI_MODEL = os.environ.get("TONALITY_GEMINI_MODEL", GEMINI_MODEL) # Slightly thinker model or maybe just light one
-REGIME_GEMINI_MODEL = os.environ.get("REGIME_GEMINI_MODEL", GEMINI_MODEL) #Thinker model
-PORTFOLIO_GEMINI_MODEL = os.environ.get("PORTFOLIO_GEMINI_MODEL", GEMINI_MODEL) #Super Thinker model
-RISK_REVIEWER_GEMINI_MODEL = os.environ.get("RISK_REVIEWER_GEMINI_MODEL", GEMINI_MODEL) #Critic model
-PORTFOLIO_REVISE_GEMINI_MODEL = os.environ.get("PORTFOLIO_REVISE_GEMINI_MODEL", GEMINI_MODEL) #Revise model
+SCOUT_GEMINI_MODEL = os.environ.get("SCOUT_GEMINI_MODEL", "gemini-2.5-flash-lite") #Doer
+TONALITY_GEMINI_MODEL = os.environ.get("TONALITY_GEMINI_MODEL", "gemini-2.5-flash") # Slightly thinker model or maybe just light one
+REGIME_GEMINI_MODEL = os.environ.get("REGIME_GEMINI_MODEL", "gemini-3.1-pro-preview") #Thinker model
+PORTFOLIO_GEMINI_MODEL = os.environ.get("PORTFOLIO_GEMINI_MODEL", "gemini-3.1-pro-preview") #Super Thinker model
+RISK_REVIEWER_GEMINI_MODEL = os.environ.get("RISK_REVIEWER_GEMINI_MODEL", "gemini-3.1-pro-preview") #Critic model
+PORTFOLIO_REVISE_GEMINI_MODEL = os.environ.get("PORTFOLIO_REVISE_GEMINI_MODEL", "gemini-3.1-pro-preview") #Revise model
 
 # =============================================================================
 # ScoutNode – Enrichment Engine
