@@ -9,6 +9,9 @@ google-genai>=2.8             # Gemini LLM for importance scoring & query genera
 feedparser>=6.0              # RSS feed parsing (GlobalOutlets.py)
 aiohttp>=3.9                 # Async HTTP client (WireIngestor.py)
 
+# Retry & resilience
+tenacity>=8.0                # Exponential backoff retry for LLM API calls
+
 # Persistence
 aiosqlite>=0.20              # Async SQLite (optional, for future)
 pydantic>=2.0                # Data validation (NewsArticle.py)

@@ -78,14 +78,14 @@ async def main_pipeline() -> List[ScoutArticle]:
     print("=" * 60)
 
     scout = ScoutNode()
-    enriched_articles: List[ScoutArticle] = scout.enrich_batch(all_articles)
+    enriched_articles: List[ScoutArticle] = await scout.enrich_batch(all_articles)
 
     print("\n" + "=" * 60)
     print("🎭 Emotional tonality analysis — separating emotion from facts...")
     print("=" * 60)
 
     tone_analyst = ToneAnalystNode()
-    enriched_articles = tone_analyst.analyze_batch(enriched_articles)
+    enriched_articles = await tone_analyst.analyze_batch(enriched_articles)
 
     print("\n" + "=" * 60)
     print("🔗 Cluster search — finding related articles for high-disparity pieces...")
@@ -93,7 +93,7 @@ async def main_pipeline() -> List[ScoutArticle]:
 
     db_sink = DatabaseSink()
     cluster_finder = ClusterFinder(db_sink=db_sink, tone_analyst=tone_analyst)
-    enriched_articles = cluster_finder.find_clusters(enriched_articles)
+    enriched_articles = await cluster_finder.find_clusters(enriched_articles)
 
     # ── Build NewsArticle list with emotional analysis data for DB persistence ──
     db_articles: List[NewsArticle] = []

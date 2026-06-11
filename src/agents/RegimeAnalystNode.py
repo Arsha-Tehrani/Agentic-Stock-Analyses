@@ -21,12 +21,12 @@ where:
 All tunable constants are in src/config.py.
 """
 
-import json
 from typing import List, Optional
 
 from google import genai
 
 from src.state import ScoutArticle, RegimeAnalysis, GraphState, CurrentMarketState
+from src.utils.json_repair import parse_json_with_repair
 from src.config import (
     GEMINI_API_KEY,
     REGIME_GEMINI_MODEL,  # Per-agent model config
@@ -36,6 +36,7 @@ from src.config import (
     REGIME_WEIGHT_ROTATION,
     REGIME_WEIGHT_EMOTIONAL,
     REGIME_SIGNIFICANCE_THRESHOLD,
+    REGIME_INDIVIDUAL_TRIGGER_THRESHOLD,
     REGIME_DEFAULT_MARKET_STATE,
 )
 
@@ -119,7 +120,7 @@ class RegimeAnalystNode:
             if text.startswith("json"):
                 text = text[4:].strip()
 
-            llm_result = json.loads(text)
+            llm_result = parse_json_with_repair(text)
 
             # Extract LLM scores (1-10 per factor)
             macro_score = max(1, min(10, int(llm_result.get("macro_score", 1))))
@@ -137,7 +138,18 @@ class RegimeAnalystNode:
             )
             significance = max(0, min(100, significance))
 
-            proceed = significance > REGIME_SIGNIFICANCE_THRESHOLD
+            # Composite gate
+            composite_trigger = significance > REGIME_SIGNIFICANCE_THRESHOLD
+
+            # Individual trigger: open the gate if ANY single factor score
+            # reaches the threshold, regardless of the weighted composite.
+            individual_trigger = (
+                macro_score >= REGIME_INDIVIDUAL_TRIGGER_THRESHOLD
+                or rotation_score >= REGIME_INDIVIDUAL_TRIGGER_THRESHOLD
+                or emotional_score >= REGIME_INDIVIDUAL_TRIGGER_THRESHOLD
+            )
+
+            proceed = composite_trigger or individual_trigger
 
             analysis = RegimeAnalysis(
                 Macro_Analysis=llm_result.get("Macro_Analysis", "No macro analysis provided."),
@@ -152,7 +164,7 @@ class RegimeAnalystNode:
                 proceed_to_portfolio_manager=proceed,
             )
 
-            print_analysis(analysis)
+            print_analysis(analysis, composite_trigger, individual_trigger)
             return analysis
 
         except Exception as e:
@@ -338,7 +350,13 @@ class RegimeAnalystNode:
             )
         )
         significance = max(0, min(100, significance))
-        proceed = significance > REGIME_SIGNIFICANCE_THRESHOLD
+        composite_trigger = significance > REGIME_SIGNIFICANCE_THRESHOLD
+        individual_trigger = (
+            macro_score >= REGIME_INDIVIDUAL_TRIGGER_THRESHOLD
+            or rotation_score >= REGIME_INDIVIDUAL_TRIGGER_THRESHOLD
+            or emotional_score >= REGIME_INDIVIDUAL_TRIGGER_THRESHOLD
+        )
+        proceed = composite_trigger or individual_trigger
 
         analysis = RegimeAnalysis(
             Macro_Analysis=(
@@ -359,7 +377,7 @@ class RegimeAnalystNode:
             Significance_Score=significance,
             proceed_to_portfolio_manager=proceed,
         )
-        print_analysis(analysis)
+        print_analysis(analysis, composite_trigger, individual_trigger)
         return analysis
 
 
@@ -380,19 +398,46 @@ def route_after_regime_analyst(state: GraphState) -> str:
 # ------------------------------------------------------------------
 # Pretty-printing
 # ------------------------------------------------------------------
-def print_analysis(analysis: RegimeAnalysis) -> None:
-    """Print a formatted summary of the regime analysis."""
-    verdict = (
-        "🚨 REGIME CHANGE DETECTED → route to Portfolio Manager"
-        if analysis.proceed_to_portfolio_manager
-        else "✅ No regime change — market state stable"
-    )
+def print_analysis(
+    analysis: RegimeAnalysis,
+    composite_trigger: bool = False,
+    individual_trigger: bool = False,
+) -> None:
+    """Print a formatted summary of the regime analysis.
+
+    Args:
+        analysis: The completed RegimeAnalysis.
+        composite_trigger: True if the weighted significance score exceeded threshold.
+        individual_trigger: True if any single factor score hit the independent threshold.
+    """
+    if analysis.proceed_to_portfolio_manager:
+        trigger_parts: list[str] = []
+        if composite_trigger:
+            trigger_parts.append(f"Composite S={analysis.Significance_Score}>70")
+        if individual_trigger:
+            top_factor = ""
+            if analysis.macro_score >= REGIME_INDIVIDUAL_TRIGGER_THRESHOLD:
+                top_factor = f"M:{analysis.macro_score}"
+            elif analysis.rotation_score >= REGIME_INDIVIDUAL_TRIGGER_THRESHOLD:
+                top_factor = f"R:{analysis.rotation_score}"
+            elif analysis.emotional_arbitrage_score >= REGIME_INDIVIDUAL_TRIGGER_THRESHOLD:
+                top_factor = f"E:{analysis.emotional_arbitrage_score}"
+            trigger_parts.append(f"Individual spike {top_factor}≥{REGIME_INDIVIDUAL_TRIGGER_THRESHOLD}")
+        trigger_detail = " + ".join(trigger_parts)
+        verdict = "🚨 REGIME CHANGE DETECTED → route to Portfolio Manager"
+    else:
+        verdict = "✅ No regime change — market state stable"
+        trigger_detail = ""
     print(f"    ╔══════════════════════════════════════════════╗")
     print(f"    ║  REGIME ANALYST VERDICT                      ║")
     print(f"    ╠══════════════════════════════════════════════╣")
     print(f"    ║  M (Macro):      {analysis.macro_score:2d}/10  |  R (Rotation):  {analysis.rotation_score:2d}/10  |  E (Arbitrage): {analysis.emotional_arbitrage_score:2d}/10 ║")
     print(f"    ║  Significance Score: {analysis.Significance_Score:3d}/100                     ║")
     print(f"    ║  {verdict} ║")
+    if trigger_detail:
+        trigger_display = f"    ║  Trigger: {trigger_detail}"
+        # Pad to match box width
+        print(trigger_display + " " * max(0, 50 - len(trigger_display)) + "║")
     print(f"    ╠══════════════════════════════════════════════╣")
     print(f"    ║  Macro:     {analysis.Macro_Analysis[:80]}...{' ' * max(0, 74 - len(analysis.Macro_Analysis[:80]))}║")
     print(f"    ║  Rotation:  {analysis.Rotation_Analysis[:80]}...{' ' * max(0, 74 - len(analysis.Rotation_Analysis[:80]))}║")

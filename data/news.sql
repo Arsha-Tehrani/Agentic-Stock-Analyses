@@ -106,10 +106,6 @@ CREATE TABLE IF NOT EXISTS portfolio_state (
     version                 INTEGER NOT NULL DEFAULT 1            -- Version number for tracking changes
 );
 
--- Initialize with a default row if not exists (will be populated by application)
-INSERT OR IGNORE INTO portfolio_state (id, timestamp, macro_baseline, portfolio_allocations, updated_by, version)
-VALUES (1, '2026-05-31T00:00:00', '{}', '{}', 'system', 1);
-
 CREATE INDEX IF NOT EXISTS idx_portfolio_updated_at ON portfolio_state(updated_at DESC);
 
 

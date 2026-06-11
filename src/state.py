@@ -243,9 +243,9 @@ class MacroBaseline:
     @classmethod
     def from_dict(cls, data: dict) -> "MacroBaseline":
         return cls(
-            interest_rate_trend=data["interest_rate_trend"],
-            inflation_trend=data["inflation_trend"],
-            market_regime=data["market_regime"]
+            interest_rate_trend=data.get("interest_rate_trend", "Holding"),
+            inflation_trend=data.get("inflation_trend", "Stable"),
+            market_regime=data.get("market_regime", "Unknown"),
         )
 
 

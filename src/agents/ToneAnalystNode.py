@@ -10,27 +10,68 @@ For every ScoutArticle, this node uses an LLM to:
 When the emotional_disparity is high, it signals potential market
 overreaction or underreaction that downstream agents can act on.
 
+Concurrency: analyses articles with asyncio.gather capped by asyncio.Semaphore(N)
+to avoid overwhelming the Gemini API. Retries 429/503 with exponential backoff.
+Includes JSON truncation recovery (auto-repair missing closing brackets).
+
 All tunable constants are in src/config.py.
 """
 
-import json
+import asyncio
+import random
 import re
 from typing import List, Optional
 
 from google import genai
+from tenacity import (
+    retry,
+    wait_exponential,
+    stop_after_attempt,
+    retry_if_exception_type,
+)
 
 from src.state import ScoutArticle, EmotionalAnalysis
+from src.utils.json_repair import parse_json_with_repair
 from src.config import (
     GEMINI_API_KEY,
-    TONALITY_GEMINI_MODEL,  # Per-agent model config
+    TONALITY_GEMINI_MODEL,
     DISPARITY_THRESHOLD,
     TONALITY_TEMPERATURE,
     TONALITY_MAX_TOKENS,
     TONALITY_ANALYSIS_MAX_CHARS,
+    TONE_CONCURRENCY_LIMIT,
     TONALITY_NEGATIVE_EMOTIONAL,
     TONALITY_POSITIVE_EMOTIONAL,
     TONALITY_FACTUAL_INDICATORS,
 )
+
+
+
+def _is_retryable_error(exception: Exception) -> bool:
+    """Return True for HTTP 429 / 503 / 5xx errors that should be retried."""
+    status = getattr(exception, "code", None)
+    if status is not None:
+        return status in (429, 503) or (isinstance(status, int) and 500 <= status < 600)
+    msg = str(exception).lower()
+    retryable_keywords = ["429", "503", "unavailable", "resource_exhausted", "rate", "quota"]
+    return any(kw in msg for kw in retryable_keywords)
+
+
+def _llm_retry_decorator(func):
+    """Exponential-backoff retry for transient Gemini errors (429/503/5xx)."""
+    return retry(
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(5),
+        retry=retry_if_exception_type(Exception),
+        after=lambda retry_state: print(
+            f"    🔄 Gemini retry attempt {retry_state.attempt_number}/5 "
+            f"(waited {retry_state.outcome_timestamp - retry_state.start_time:.1f}s) "
+            f"— error was: {retry_state.outcome.exception()}"
+        ) if retry_state.outcome and retry_state.outcome.failed else None,
+        before_sleep=lambda retry_state: print(
+            f"    ⏳ Backing off {retry_state.next_action.sleep:.1f}s before retry..."
+        ) if retry_state.next_action and retry_state.next_action.sleep else None,
+    )(func)
 
 
 class ToneAnalystNode:
@@ -38,22 +79,50 @@ class ToneAnalystNode:
     Analyses the emotional tonality of enriched articles, separating
     emotional language from factual/numeric content to compute a
     disparity score.
+
+    Uses async concurrency with a semaphore to limit simultaneous LLM calls.
     """
 
     def __init__(self):
         self._client: Optional[genai.Client] = None
         if GEMINI_API_KEY:
             self._client = genai.Client(api_key=GEMINI_API_KEY)
+        self._semaphore = asyncio.Semaphore(TONE_CONCURRENCY_LIMIT)
 
     # ------------------------------------------------------------------
-    # Public API
+    # Public API — async batch analysis
     # ------------------------------------------------------------------
-    def analyze(self, article: ScoutArticle) -> ScoutArticle:
-        """
-        Analyse a single ScoutArticle and attach its EmotionalAnalysis.
-        Returns the same article (mutated in-place for convenience).
-        """
-        analysis = self._run_tonality_analysis(article)
+    async def analyze_batch(self, articles: List[ScoutArticle]) -> List[ScoutArticle]:
+        """Analyze a batch of ScoutArticles concurrently, capped by a semaphore."""
+        sem = self._semaphore
+
+        async def analyze_one(idx: int, article: ScoutArticle) -> ScoutArticle:
+            # Jittered stagger: spaces out semaphore acquisition so the API
+            # sees a gentle trickle instead of a burst. The random jitter
+            # (±0.1s around the deterministic delay) prevents Tenacity retries
+            # from re-synchronizing and spiking the API again.
+            await asyncio.sleep(idx * 0.1 + random.uniform(0, 0.2))
+            async with sem:
+                print(f"\n  🎭 Tone [{idx+1}/{len(articles)}] {article.title[:70]}...")
+                try:
+                    return await self._analyze(article)
+                except Exception as e:
+                    print(f"    ❌ Tone analysis failed: {e}")
+                    article.emotional_analysis = self._neutral_fallback()
+                    return article
+
+        tasks = [analyze_one(i, a) for i, a in enumerate(articles)]
+        results = await asyncio.gather(*tasks)
+
+        high_disparity_count = sum(
+            1 for a in results
+            if a.emotional_analysis and a.emotional_analysis.disparity_score >= DISPARITY_THRESHOLD
+        )
+        print(f"\n  📊 Tone analysis complete: {high_disparity_count}/{len(articles)} articles show high emotional disparity")
+        return list(results)
+
+    async def _analyze(self, article: ScoutArticle) -> ScoutArticle:
+        analysis = await self._run_tonality_analysis(article)
         article.emotional_analysis = analysis
 
         if analysis.disparity_score >= DISPARITY_THRESHOLD:
@@ -63,26 +132,10 @@ class ToneAnalystNode:
 
         return article
 
-    def analyze_batch(self, articles: List[ScoutArticle]) -> List[ScoutArticle]:
-        """Analyze a batch of ScoutArticles for emotional tonality."""
-        high_disparity_count = 0
-        for i, article in enumerate(articles):
-            print(f"\n  🎭 Tone [{i+1}/{len(articles)}] {article.title[:70]}...")
-            try:
-                self.analyze(article)
-                if article.emotional_analysis and article.emotional_analysis.disparity_score >= DISPARITY_THRESHOLD:
-                    high_disparity_count += 1
-            except Exception as e:
-                print(f"    ❌ Tone analysis failed: {e}")
-                article.emotional_analysis = self._neutral_fallback()
-
-        print(f"\n  📊 Tone analysis complete: {high_disparity_count}/{len(articles)} articles show high emotional disparity")
-        return articles
-
     # ------------------------------------------------------------------
-    # Core LLM-based analysis
+    # Core LLM-based analysis (async + retry + JSON repair)
     # ------------------------------------------------------------------
-    def _run_tonality_analysis(self, article: ScoutArticle) -> EmotionalAnalysis:
+    async def _run_tonality_analysis(self, article: ScoutArticle) -> EmotionalAnalysis:
         if not self._client:
             return self._heuristic_tonality(article)
 
@@ -122,29 +175,23 @@ class ToneAnalystNode:
         )
 
         try:
-            response = self._client.models.generate_content(
+            result = await self._call_gemini_with_retry(
                 model=TONALITY_GEMINI_MODEL,
-                contents=prompt,
-                config={"temperature": TONALITY_TEMPERATURE, "max_output_tokens": TONALITY_MAX_TOKENS},
+                prompt=prompt,
+                temperature=TONALITY_TEMPERATURE,
+                max_tokens=TONALITY_MAX_TOKENS,
             )
-            text = response.text.strip()
-
-            # Strip markdown code fences if present
-            if text.startswith("```"):
-                text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            # Sometimes the model wraps in ```json ... ```
-            if text.startswith("json"):
-                text = text[4:].strip()
-
-            result = json.loads(text)
 
             emotional_score = max(-1.0, min(1.0, float(result.get("emotional_score", 0.0))))
             factual_score = max(0.0, min(1.0, float(result.get("factual_score", 0.5))))
 
-            # Disparity = how much the emotional magnitude exceeds factual backing
-            # A score of 0 means emotional intensity matches factual substance
-            # Higher values mean the emotion is disproportionate to the facts
-            disparity = max(0.0, round(abs(emotional_score) - factual_score, 2))
+            # Disparity = emotional magnitude scaled by how UNfactual the article is.
+            # A highly factual article (0.95) with moderate emotion (0.60) still has
+            # meaningful emotional framing: 0.60 * (1 - 0.95*0.5) = 0.60 * 0.525 ≈ 0.31
+            # This replaces the old formula max(0, abs(emotional) - factual) which
+            # zeroed out disparity for ALL wire-service articles.
+            factual_dampening = max(0.0, 1.0 - factual_score * 0.5)
+            disparity = max(0.0, round(abs(emotional_score) * factual_dampening, 2))
 
             valid_labels = {"alarmist", "measured", "euphoric", "clinical", "balanced", "sensationalist"}
             tonality_label = result.get("tonality_label", "balanced")
@@ -161,11 +208,11 @@ class ToneAnalystNode:
                 key_factual_claims=result.get("key_factual_claims", []),
             )
         except Exception as e:
-            print(f"    ⚠️  LLM tonality analysis failed: {e}")
+            print(f"    ⚠️  LLM tonality analysis failed after retries: {e}")
             return self._heuristic_tonality(article)
 
     # ------------------------------------------------------------------
-    # Heuristic fallback (no Gemini key or API failure)
+    # Heuristic fallback (no Gemini key or exhausted retries)
     # ------------------------------------------------------------------
     def _heuristic_tonality(self, article: ScoutArticle) -> EmotionalAnalysis:
         text = (
@@ -196,7 +243,8 @@ class ToneAnalystNode:
             factual_hits += text.count(kw)
         factual_score = max(0.0, min(1.0, round(factual_hits * 0.08, 2)))
 
-        disparity = max(0.0, round(abs(emotional_score) - factual_score, 2))
+        factual_dampening = max(0.0, 1.0 - factual_score * 0.5)
+        disparity = max(0.0, round(abs(emotional_score) * factual_dampening, 2))
 
         if emotional_hits == 0 and factual_hits == 0:
             tonality_label = "balanced"
@@ -233,3 +281,38 @@ class ToneAnalystNode:
             key_emotional_phrases=[],
             key_factual_claims=[],
         )
+
+    # ------------------------------------------------------------------
+    # Gemini helpers — async calls with retry for transient errors
+    # ------------------------------------------------------------------
+    @_llm_retry_decorator
+    async def _call_gemini_with_retry(
+        self, model: str, prompt: str, temperature: float, max_tokens: int
+    ) -> dict:
+        """Call Gemini, return parsed JSON dict (with truncation repair). Retries on 429/503/5xx."""
+        text = await self._call_gemini_raw(model, prompt, temperature, max_tokens)
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        if text.startswith("json"):
+            text = text[4:].strip()
+        return parse_json_with_repair(text)
+
+    async def _call_gemini_raw(
+        self, model: str, prompt: str, temperature: float, max_tokens: int
+    ) -> str:
+        """Call Gemini and return raw text. Uses run_in_executor for the sync SDK."""
+        loop = asyncio.get_running_loop()
+
+        def _sync_call():
+            try:
+                response = self._client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config={"temperature": temperature, "max_output_tokens": max_tokens},
+                )
+                return response.text.strip()
+            except Exception as e:
+                raise  # Let tenacity/retry logic handle it
+
+        return await loop.run_in_executor(None, _sync_call)

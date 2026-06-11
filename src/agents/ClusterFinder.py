@@ -15,6 +15,7 @@ signal indicates a genuine market sentiment shift or just noise.
 All tunable constants are in src/config.py.
 """
 
+import asyncio
 from typing import List, Optional
 
 from src.db.DatabaseSink import DatabaseSink
@@ -46,7 +47,7 @@ class ClusterFinder:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def find_clusters(
+    async def find_clusters(
         self,
         articles: List[ScoutArticle],
         disparity_threshold: Optional[float] = None,
@@ -75,7 +76,7 @@ class ClusterFinder:
                 related = self._find_related(article)
                 if related:
                     # Run tonality on the related articles so we can compare
-                    self._tone_analyst.analyze_batch(related)
+                    await self._tone_analyst.analyze_batch(related)
                     article.related_articles = related
                     print(f"      📰 Found {len(related)} related article(s) — emotional comparison ready")
                 else:
