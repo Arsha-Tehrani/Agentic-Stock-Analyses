@@ -8,6 +8,7 @@ google-genai>=2.8             # Gemini LLM for importance scoring & query genera
 # News ingestion
 feedparser>=6.0              # RSS feed parsing (GlobalOutlets.py)
 aiohttp>=3.9                 # Async HTTP client (WireIngestor.py)
+crawl4ai>=0.5                # Async web crawling for financial news scraping
 
 # Retry & resilience
 tenacity>=8.0                # Exponential backoff retry for LLM API calls

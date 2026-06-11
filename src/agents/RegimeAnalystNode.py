@@ -18,18 +18,23 @@ where:
     E = Emotional Arbitrage Gap (LLM scores 1-10)
     alpha=0.35, beta=0.40, gamma=0.25  (configurable in src/config.py)
 
+Native JSON mode: Uses response_mime_type="application/json" + response_schema
+to force structured output from the API. System instruction is separated from
+user content to prevent instruction-echo responses. Safety-filtered responses
+(text=None) are caught and fall back to heuristic analysis.
+
 All tunable constants are in src/config.py.
 """
 
 from typing import List, Optional
 
 from google import genai
+from pydantic import BaseModel, Field
 
 from src.state import ScoutArticle, RegimeAnalysis, GraphState, CurrentMarketState
-from src.utils.json_repair import parse_json_with_repair
 from src.config import (
     GEMINI_API_KEY,
-    REGIME_GEMINI_MODEL,  # Per-agent model config
+    REGIME_GEMINI_MODEL,
     REGIME_LLM_TEMPERATURE,
     REGIME_LLM_MAX_TOKENS,
     REGIME_WEIGHT_MACRO,
@@ -39,12 +44,37 @@ from src.config import (
     REGIME_INDIVIDUAL_TRIGGER_THRESHOLD,
     REGIME_DEFAULT_MARKET_STATE,
 )
+from tenacity import (
+    retry,
+    wait_exponential,
+    stop_after_attempt,
+    retry_if_exception_type,
+)
+
+
+# ── Native JSON Structured-Output Schema ─────────────────────────────────
+class RegimeResponse(BaseModel):
+    """Pydantic schema for Gemini native JSON mode — regime analysis.
+
+    The Significance_Score and proceed_to_portfolio_manager fields are
+    computed by the Python orchestrator, NOT by the LLM. The LLM only
+    provides the three analysis texts and three integer scores (1-10).
+    """
+    Macro_Analysis: str = Field(description="Brief explanation of macro shifts vs baseline")
+    Rotation_Analysis: str = Field(description="Brief identification of sector/capital flows")
+    Emotional_Arbitrage_Analysis: str = Field(description="Brief explanation of over/under-reaction")
+    macro_score: int = Field(ge=1, le=10, description="Macro impact score 1-10")
+    rotation_score: int = Field(ge=1, le=10, description="Rotation intensity score 1-10")
+    emotional_arbitrage_score: int = Field(ge=1, le=10, description="Emotional arbitrage score 1-10")
 
 
 class RegimeAnalystNode:
     """
     Evaluates enriched articles against the current market baseline to
     detect macro regime shifts and capital rotation signals.
+
+    Native JSON mode prevents instruction-echo responses and guarantees
+    well-formed output.
     """
 
     def __init__(self):
@@ -88,7 +118,7 @@ class RegimeAnalystNode:
         return state
 
     # ------------------------------------------------------------------
-    # Core LLM-based analysis
+    # Core LLM-based analysis (native JSON mode)
     # ------------------------------------------------------------------
     def _run_analysis(
         self,
@@ -100,35 +130,23 @@ class RegimeAnalystNode:
 
         # Build the payload: summary of all articles with their emotional/factual split
         article_summaries = self._build_article_payload(articles)
-
-        prompt = self._build_system_prompt(article_summaries, market_state)
+        system_instruction = self._build_system_instruction()
+        contents = self._build_contents(article_summaries, market_state)
 
         try:
-            response = self._client.models.generate_content(
-                model=REGIME_GEMINI_MODEL,
-                contents=prompt,
-                config={
-                    "temperature": REGIME_LLM_TEMPERATURE,
-                    "max_output_tokens": REGIME_LLM_MAX_TOKENS,
-                },
-            )
-            text = response.text.strip()
+            llm_result = self._call_regime_gemini(system_instruction, contents)
 
-            # Strip markdown code fences if present
-            if text.startswith("```"):
-                text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            if text.startswith("json"):
-                text = text[4:].strip()
-
-            llm_result = parse_json_with_repair(text)
+            # Guard against safety-filtered responses
+            if llm_result is None:
+                print("    ⚠️  Gemini returned safety-filtered response (text=None). Falling back to heuristic.")
+                return self._heuristic_analysis(articles, market_state)
 
             # Extract LLM scores (1-10 per factor)
-            macro_score = max(1, min(10, int(llm_result.get("macro_score", 1))))
-            rotation_score = max(1, min(10, int(llm_result.get("rotation_score", 1))))
-            emotional_score = max(1, min(10, int(llm_result.get("emotional_arbitrage_score", 1))))
+            macro_score = max(1, min(10, int(llm_result.macro_score)))
+            rotation_score = max(1, min(10, int(llm_result.rotation_score)))
+            emotional_score = max(1, min(10, int(llm_result.emotional_arbitrage_score)))
 
             # Compute weighted Significance Score (0-100 scale)
-            # Each factor scored 1-10, so (score/10)*weight*100 gives factor's contribution
             significance = int(
                 round(
                     (macro_score / 10.0) * REGIME_WEIGHT_MACRO * 100
@@ -152,11 +170,9 @@ class RegimeAnalystNode:
             proceed = composite_trigger or individual_trigger
 
             analysis = RegimeAnalysis(
-                Macro_Analysis=llm_result.get("Macro_Analysis", "No macro analysis provided."),
-                Rotation_Analysis=llm_result.get("Rotation_Analysis", "No rotation analysis provided."),
-                Emotional_Arbitrage_Analysis=llm_result.get(
-                    "Emotional_Arbitrage_Analysis", "No emotional arbitrage analysis provided."
-                ),
+                Macro_Analysis=llm_result.Macro_Analysis or "No macro analysis provided.",
+                Rotation_Analysis=llm_result.Rotation_Analysis or "No rotation analysis provided.",
+                Emotional_Arbitrage_Analysis=llm_result.Emotional_Arbitrage_Analysis or "No emotional arbitrage analysis provided.",
                 macro_score=macro_score,
                 rotation_score=rotation_score,
                 emotional_arbitrage_score=emotional_score,
@@ -213,14 +229,58 @@ class RegimeAnalystNode:
 
         return "\n\n".join(lines)
 
-    def _build_system_prompt(
+    def _build_system_instruction(self) -> str:
+        """Build the system instruction (role definition + scoring rubric).
+
+        Kept separate from the data payload to prevent instruction-echo
+        responses where the model recites prompt rules instead of producing JSON.
+        """
+        return (
+            "You are a senior quantitative macro strategist at a hedge fund. "
+            "Your job is to act as a STRICT GATEKEEPER: evaluate whether incoming "
+            "news and data constitute a genuine 'Regime Change' that requires "
+            "portfolio reallocation.\n\n"
+            "A regime change means:\n"
+            "- A structural shift in macroeconomic conditions (rates, inflation, growth)\n"
+            "- OR identifiable capital rotation between sectors or sub-sectors\n"
+            "- OR a significant emotional arbitrage gap (market wildly over/under-reacting)\n\n"
+            "Analyze the articles provided against the CURRENT MARKET BASELINE and "
+            "score each factor on a scale of 1 (irrelevant) to 10 (extreme impact).\n\n"
+            "=== SCORING RUBRIC ===\n\n"
+            "1. MACRO IMPACT (M, 1-10):\n"
+            "   - Do articles indicate a shift in rate policy, inflation trajectory,\n"
+            "     GDP growth, employment, or geopolitical macro risk?\n"
+            "   - 1-3: No macro signal. 4-6: Notable but not regime-altering.\n"
+            "     7-8: Clear macro shift emerging. 9-10: Structural macro regime change.\n\n"
+            "2. ROTATION INTENSITY (R, 1-10):\n"
+            "   - Is there verifiable evidence of capital flowing FROM one sector\n"
+            "     or sub-sector INTO another? Consider both broad sector rotation\n"
+            "     and intra-sector shifts (e.g. Semiconductors -> Software, AI infra -> AI apps).\n"
+            "   - Pay special attention to the portfolio's current sector weights\n"
+            "     when evaluating if a rotation threatens our positioning.\n"
+            "   - 1-3: No rotation signal. 4-6: Early rotation hints.\n"
+            "     7-8: Clear rotation underway. 9-10: Massive capital migration.\n\n"
+            "3. EMOTIONAL ARBITRAGE (E, 1-10):\n"
+            "   - Using the provided emotional/factual disparity scores and\n"
+            "     related article clusters, assess whether the market narrative\n"
+            "     is ignoring a structural shift (underreaction) or violently\n"
+            "     overreacting to noise (overreaction).\n"
+            "   - High disparity + isolated reaction = potential arbitrage opportunity.\n"
+            "   - Low disparity + broad consensus = efficient pricing, low arbitrage.\n"
+            "   - 1-3: No arbitrage gap. 4-6: Moderate narrative distortion.\n"
+            "     7-8: Significant over/under-reaction. 9-10: Extreme narrative disconnect."
+        )
+
+    def _build_contents(
         self,
         article_summaries: str,
         market_state: CurrentMarketState,
     ) -> str:
-        """Build the full system prompt for the LLM."""
+        """Build the user-facing content (market baseline data + articles).
 
-        # Format market state for the prompt
+        Contains only data — no instructions, no rules, no "Respond ONLY with..."
+        boilerplate. The schema enforces JSON formatting at the API level."
+        """
         macro = market_state.get("macro_baseline", {})
         alloc = market_state.get("portfolio_allocations", {})
         sectors = alloc.get("sectors", {})
@@ -233,17 +293,7 @@ class RegimeAnalystNode:
             )
         sector_summary = "\n".join(sector_lines) if sector_lines else "  (No sector data provided)"
 
-        prompt = (
-            "You are a senior quantitative macro strategist at a hedge fund.\n"
-            "Your job is to act as a STRICT GATEKEEPER: evaluate whether incoming\n"
-            "news and data constitute a genuine 'Regime Change' that requires\n"
-            "portfolio reallocation.\n\n"
-            "A regime change means:\n"
-            "- A structural shift in macroeconomic conditions (rates, inflation, growth)\n"
-            "- OR identifiable capital rotation between sectors or sub-sectors\n"
-            "- OR a significant emotional arbitrage gap (market wildly over/under-reacting)\n\n"
-            "Analyze the articles below against the CURRENT MARKET BASELINE and\n"
-            "score each factor on a scale of 1 (irrelevant) to 10 (extreme impact).\n\n"
+        return (
             "=== CURRENT MARKET BASELINE ===\n"
             f"Timestamp: {market_state.get('timestamp', 'unknown')}\n"
             f"Macro Regime: {macro.get('market_regime', 'unknown')}\n"
@@ -252,47 +302,57 @@ class RegimeAnalystNode:
             f"Cash Reserves: {alloc.get('cash_reserves_percent', 0)}%\n"
             f"Portfolio Value: ${alloc.get('total_value', 0):,.2f}\n"
             f"Sector Allocations:\n{sector_summary}\n\n"
-            "=== SCORING RUBRIC ===\n\n"
-            "1. MACRO IMPACT (M, 1-10):\n"
-            "   - Do articles indicate a shift in rate policy, inflation trajectory,\n"
-            "     GDP growth, employment, or geopolitical macro risk?\n"
-            "   - 1-3: No macro signal. 4-6: Notable but not regime-altering.\n"
-            "     7-8: Clear macro shift emerging. 9-10: Structural macro regime change.\n\n"
-            "2. ROTATION INTENSITY (R, 1-10):\n"
-            "   - Is there verifiable evidence of capital flowing FROM one sector\n"
-            "     or sub-sector INTO another? Consider both broad sector rotation\n"
-            "     (e.g. Tech -> Healthcare) and intra-sector shifts\n"
-            "     (e.g. Semiconductors -> Software, or AI infra -> AI apps).\n"
-            "   - Pay special attention to our CURRENT portfolio sector weights\n"
-            "     when evaluating if a rotation threatens our positioning.\n"
-            "   - 1-3: No rotation signal. 4-6: Early rotation hints.\n"
-            "     7-8: Clear rotation underway. 9-10: Massive capital migration.\n\n"
-            "3. EMOTIONAL ARBITRAGE (E, 1-10):\n"
-            "   - Using the provided emotional/factual disparity scores and\n"
-            "     related article clusters, assess whether the market narrative\n"
-            "     is ignoring a structural shift (underreaction) or violently\n"
-            "     overreacting to noise (overreaction).\n"
-            "   - High disparity + isolated reaction = potential arbitrage opportunity.\n"
-            "   - Low disparity + broad consensus = efficient pricing, low arbitrage.\n"
-            "   - 1-3: No arbitrage gap. 4-6: Moderate narrative distortion.\n"
-            "     7-8: Significant over/under-reaction. 9-10: Extreme narrative disconnect.\n\n"
             "=== ARTICLES TO ANALYZE ===\n\n"
-            f"{article_summaries}\n\n"
-            "=== REQUIRED OUTPUT FORMAT ===\n\n"
-            "Respond ONLY with valid JSON in this exact format:\n"
-            "{\n"
-            '  "Macro_Analysis": "Brief 1-2 sentence explanation of macro shifts vs baseline.",\n'
-            '  "Rotation_Analysis": "Brief 1-2 sentence identification of sector/capital flows.",\n'
-            '  "Emotional_Arbitrage_Analysis": "Brief 1-2 sentence on over/under-reaction.",\n'
-            '  "macro_score": 5,\n'
-            '  "rotation_score": 7,\n'
-            '  "emotional_arbitrage_score": 4\n'
-            "}\n\n"
-            "CRITICAL: All three scores MUST be integers between 1 and 10 inclusive.\n"
-            "Do not include Significance_Score or proceed_to_portfolio_manager -\n"
-            "those are computed by the system, not by you."
+            f"{article_summaries}"
         )
-        return prompt
+
+    # ------------------------------------------------------------------
+    # Gemini call with native JSON mode + retry for transient errors
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _retry_regime_decorator(func):
+        """Exponential-backoff retry for transient Gemini errors (429/503/5xx)."""
+        return retry(
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            stop=stop_after_attempt(3),
+            retry=retry_if_exception_type(Exception),
+            after=lambda retry_state: print(
+                f"    🔄 Regime Gemini retry attempt {retry_state.attempt_number}/3 "
+                f"(waited {retry_state.outcome_timestamp - retry_state.start_time:.1f}s) "
+                f"— error was: {retry_state.outcome.exception()}"
+            ) if retry_state.outcome and retry_state.outcome.failed else None,
+            before_sleep=lambda retry_state: print(
+                f"    ⏳ Backing off {retry_state.next_action.sleep:.1f}s before retry..."
+            ) if retry_state.next_action and retry_state.next_action.sleep else None,
+        )(func)
+
+    def _call_regime_gemini(self, system_instruction: str, contents: str) -> Optional[RegimeResponse]:
+        """Call Gemini with native JSON mode. Returns typed Pydantic model or None."""
+        @self._retry_regime_decorator
+        def _sync_call():
+            response = self._client.models.generate_content(
+                model=REGIME_GEMINI_MODEL,
+                contents=contents,
+                config={
+                    "temperature": REGIME_LLM_TEMPERATURE,
+                    "max_output_tokens": REGIME_LLM_MAX_TOKENS,
+                    "response_mime_type": "application/json",
+                    "response_schema": RegimeResponse,
+                    "system_instruction": system_instruction,
+                },
+            )
+
+            # Guard against safety-filtered responses where .text is None
+            if response.text is None:
+                return None
+
+            # Native JSON mode: response.parsed contains the typed model
+            if hasattr(response, "parsed") and response.parsed is not None:
+                return response.parsed
+            # Fallback: parse from text
+            return RegimeResponse.model_validate_json(response.text.strip())
+
+        return _sync_call()
 
     # ------------------------------------------------------------------
     # Heuristic fallback (no Gemini key or API failure)
@@ -325,7 +385,6 @@ class RegimeAnalystNode:
                 rotation_signals += 2
             elif hits >= 1:
                 rotation_signals += 1
-            # Ticker tags suggest asset-specific content
             if a.ticker_tags:
                 rotation_signals += 1
         rotation_score = max(1, min(10, rotation_signals * 2))
@@ -339,7 +398,6 @@ class RegimeAnalystNode:
                 disp_count += 1
         if disp_count:
             avg_disparity /= disp_count
-        # Disparity 0-1 maps to E 1-10
         emotional_score = max(1, min(10, int(round(avg_disparity * 10)) + 1))
 
         significance = int(
@@ -436,7 +494,6 @@ def print_analysis(
     print(f"    ║  {verdict} ║")
     if trigger_detail:
         trigger_display = f"    ║  Trigger: {trigger_detail}"
-        # Pad to match box width
         print(trigger_display + " " * max(0, 50 - len(trigger_display)) + "║")
     print(f"    ╠══════════════════════════════════════════════╣")
     print(f"    ║  Macro:     {analysis.Macro_Analysis[:80]}...{' ' * max(0, 74 - len(analysis.Macro_Analysis[:80]))}║")

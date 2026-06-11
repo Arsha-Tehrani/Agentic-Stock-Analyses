@@ -14,11 +14,11 @@ import os
 # =============================================================================
 # LLM / Gemini Configuration
 # =============================================================================
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "API Key")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")  # Global fallback
 
 # Per-agent model selection (explicit environment variable names)
-SCOUT_GEMINI_MODEL = os.environ.get("SCOUT_GEMINI_MODEL", "gemini-2.5-flash-lite") #Doer
+SCOUT_GEMINI_MODEL = os.environ.get("SCOUT_GEMINI_MODEL", "gemini-2.5-flash") #Doer
 TONALITY_GEMINI_MODEL = os.environ.get("TONALITY_GEMINI_MODEL", "gemini-2.5-flash") # Slightly thinker model or maybe just light one
 REGIME_GEMINI_MODEL = os.environ.get("REGIME_GEMINI_MODEL", "gemini-3.1-pro-preview") #Thinker model
 PORTFOLIO_GEMINI_MODEL = os.environ.get("PORTFOLIO_GEMINI_MODEL", "gemini-3.1-pro-preview") #Super Thinker model
@@ -39,7 +39,7 @@ SCOUT_IMPORTANCE_PROMPT_CHARS = 500  # Max summary chars fed into the importance
 
 # Gemini search-query generation
 SCOUT_QUERY_TEMPERATURE = 0.2
-SCOUT_QUERY_MAX_TOKENS = 60
+SCOUT_QUERY_MAX_TOKENS = 80         # Margin for longer entity names (was 60)
 SCOUT_QUERY_PROMPT_CHARS = 400      # Max summary chars fed into the query prompt
 
 # Heuristic importance fallback (keyword-based when no Gemini key)
@@ -56,13 +56,15 @@ SCOUT_MEDIUM_IMPACT_KWS = [
     "currency", "dollar", "euro", "yen", "emerging market",
 ]
 SCOUT_HIGH_IMPACT_SOURCES = {"bloomberg", "reuters", "wsj", "financial times"}
+SCOUT_CONCURRENCY_LIMIT = 5           # Max concurrent Gemini/DDG calls in ScoutNode
 
 # =============================================================================
 # ToneAnalystNode – Emotional Tonality Analysis
 # =============================================================================
 DISPARITY_THRESHOLD = 0.35          # Disparity ≥ this triggers cluster search
+TONE_CONCURRENCY_LIMIT = 5          # Max concurrent Gemini calls in ToneAnalystNode
 TONALITY_TEMPERATURE = 0.15         # Low temp for consistent tonality scores
-TONALITY_MAX_TOKENS = 400           # Room for JSON + reasoning + phrases/claims
+TONALITY_MAX_TOKENS = 2000          # Room for JSON + reasoning + 6 phrase/claim arrays (was 800)
 TONALITY_ANALYSIS_MAX_CHARS = 3000  # Max text chars fed into the tonality prompt
 
 # Heuristic tonality fallback keywords
@@ -124,7 +126,8 @@ RSS_MAX_PER_FEED = 10        # Regional RSS feed entries per source
 # =============================================================================
 # LLM temperatures
 REGIME_LLM_TEMPERATURE = 0.15 #How creative or "Conservative" the model is. 0-1. Higher is less conservative
-REGIME_LLM_MAX_TOKENS = 600
+REGIME_LLM_MAX_TOKENS = 2500   # Room for 3 analysis paragraphs + scores + JSON (was 1200)
+REGIME_INDIVIDUAL_TRIGGER_THRESHOLD = 7.0  # Individual factor score ≥ this triggers regime flag
 
 # Scoring weights (LLM scores each factor 1-10, code computes weighted S)
 REGIME_WEIGHT_MACRO = 0.35      # α — Macroeconomic Impact

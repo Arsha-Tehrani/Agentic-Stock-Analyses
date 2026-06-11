@@ -12,17 +12,22 @@ The enriched result is a ScoutArticle ready for the Regime Analyst.
 
 Concurrency: enriches articles with asyncio.gather capped by asyncio.Semaphore(N)
 to avoid overwhelming the Gemini API. Retries 429/503 with exponential backoff.
+JSON parse failures are NOT retried — they use parse_json_with_repair.
+
+System instruction is separated from user content to improve instruction
+adherence (prevents instruction echo). Safety-filtered responses (text=None)
+are caught and fall back to heuristics.
 
 All tunable constants are in src/config.py.
 """
 
 import asyncio
-import json
 import random
 from typing import List, Optional
 
 from ddgs import DDGS
 from google import genai
+from pydantic import BaseModel, Field
 from tenacity import (
     retry,
     wait_exponential,
@@ -51,6 +56,10 @@ from src.config import (
 )
 
 
+class ImportanceSchema(BaseModel):
+    score: float = Field(..., description="Importance score from 0.0 to 1.0")
+    reasoning: str = Field(..., description="Short justification for the score")
+
 
 def _is_retryable_error(exception: Exception) -> bool:
     """Return True for HTTP 429 / 503 / 5xx errors that should be retried."""
@@ -63,18 +72,13 @@ def _is_retryable_error(exception: Exception) -> bool:
 
 
 def _llm_retry_decorator(func):
-    """Exponential-backoff retry for transient Gemini errors (429/503/5xx).
-    
-    IMPORTANT: Only retries on genuine API errors (429, 503, 5xx). JSON parse
-    failures are NOT retried — they indicate malformed/truncated LLM output
-    that will produce the same result on every attempt. Use json_repair instead.
-    """
+    """Exponential-backoff retry for transient Gemini errors (429/503/5xx)."""
     return retry(
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        stop=stop_after_attempt(5),
-        retry=retry_if_exception_type(Exception),  # tenacity filters via _is_retryable_error in _sync_call
+        stop=stop_after_attempt(3),  # Reduced from 5 — JSON failures use parse_json_with_repair
+        retry=retry_if_exception_type(Exception),
         after=lambda retry_state: print(
-            f"    🔄 Gemini retry attempt {retry_state.attempt_number}/5 "
+            f"    🔄 Gemini retry attempt {retry_state.attempt_number}/3 "
             f"(waited {retry_state.outcome_timestamp - retry_state.start_time:.1f}s) "
             f"— error was: {retry_state.outcome.exception()}"
         ) if retry_state.outcome and retry_state.outcome.failed else None,
@@ -90,6 +94,7 @@ class ScoutNode:
     and aggregated web snippets.
 
     Uses async concurrency with a semaphore to limit simultaneous LLM calls.
+    System instruction is separated from contents to improve adherence.
     """
 
     def __init__(self):
@@ -106,10 +111,6 @@ class ScoutNode:
         sem = self._semaphore
 
         async def enrich_one(idx: int, article: NewsArticle) -> ScoutArticle:
-            # Jittered stagger: spaces out semaphore acquisition so the API
-            # sees a gentle trickle instead of a burst. The random jitter
-            # (±0.1s around the deterministic delay) prevents Tenacity retries
-            # from re-synchronizing and spiking the API again.
             await asyncio.sleep(idx * 0.1 + random.uniform(0, 0.2))
             async with sem:
                 print(f"\n  🔍 Scout [{idx+1}/{len(articles)}] {article.title[:70]}...")
@@ -155,33 +156,37 @@ class ScoutNode:
         )
 
     # ------------------------------------------------------------------
-    # Stage 1 – Importance evaluation via Gemini (async + retry)
+    # Stage 1 – Importance evaluation via Gemini (native structured output)
     # ------------------------------------------------------------------
     async def _evaluate_importance(self, article: NewsArticle) -> dict:
         if not self._client:
             return self._heuristic_importance(article)
 
-        prompt = (
+        system_instruction = (
             "You are a senior macro hedge fund analyst. Rate the market importance "
-            "of this news article on a scale from 0.0 (completely irrelevant) to 1.0 "
+            "of news articles on a scale from 0.0 (completely irrelevant) to 1.0 "
             "(extremely market-moving). Consider impact on equities, bonds, currencies, "
-            "and commodities.\n\n"
-            "Respond ONLY with valid JSON in this exact format:\n"
-            '{"score": 0.85, "reasoning": "Brief 1-sentence justification"}\n\n'
+            "and commodities."
+        )
+
+        contents = (
             f"Title: {article.title}\n"
             f"Source: {article.source_name} ({article.source_bucket})\n"
             f"Summary: {article.summary or (article.content[:SCOUT_IMPORTANCE_PROMPT_CHARS] if article.content else 'N/A')}\n"
         )
+
         try:
-            result = await self._call_gemini_with_retry(
+            result = await self._call_gemini_structured(
                 model=SCOUT_GEMINI_MODEL,
-                prompt=prompt,
+                system_instruction=system_instruction,
+                contents=contents,
                 temperature=SCOUT_IMPORTANCE_TEMPERATURE,
                 max_tokens=SCOUT_IMPORTANCE_MAX_TOKENS,
+                schema=ImportanceSchema,
             )
             return {
-                "score": max(0.0, min(1.0, float(result.get("score", 0.5)))),
-                "reasoning": result.get("reasoning", ""),
+                "score": max(0.0, min(1.0, float(result.score))),
+                "reasoning": result.reasoning,
             }
         except Exception as e:
             print(f"    ⚠️  Gemini importance evaluation failed after retries: {e}")
@@ -202,33 +207,41 @@ class ScoutNode:
         return {"score": round(score, 2), "reasoning": "Heuristic fallback (no Gemini key or exhausted retries)"}
 
     # ------------------------------------------------------------------
-    # Stage 2 – Search-query generation via Gemini (async + retry)
+    # Stage 2 – Search-query generation via Gemini (plain text)
     # ------------------------------------------------------------------
     async def _generate_search_query(self, article: NewsArticle) -> str:
         if not self._client:
             return self._heuristic_query(article)
 
-        prompt = (
-            "You are a research analyst. Based on the article below, generate a single, "
+        system_instruction = (
+            "You are a research analyst. Based on the article provided, generate a single, "
             "highly specific Google-search-style query that would find the most relevant "
-            "and authoritative articles, analysis, and context about this topic.\n\n"
-            "Rules:\n"
-            "- Use 5-8 keywords maximum.\n"
-            "- Include key entity names (people, companies, agencies, tickers).\n"
-            "- Prefer recent event framing.\n"
-            "- Return ONLY the query string, no explanation, no quotes.\n\n"
+            "and authoritative articles, analysis, and context about this topic."
+        )
+
+        contents = (
+            f"Rules:\n"
+            f"- Use 5-8 keywords maximum.\n"
+            f"- Include key entity names (people, companies, agencies, tickers).\n"
+            f"- Prefer recent event framing.\n"
+            f"- Return ONLY the query string, no explanation, no quotes.\n\n"
             f"Title: {article.title}\n"
             f"Summary: {article.summary or (article.content[:SCOUT_QUERY_PROMPT_CHARS] if article.content else 'N/A')}\n"
         )
+
         try:
-            text = await self._call_gemini_raw(
+            text = await self._call_gemini_text(
                 model=SCOUT_GEMINI_MODEL,
-                prompt=prompt,
+                system_instruction=system_instruction,
+                contents=contents,
                 temperature=SCOUT_QUERY_TEMPERATURE,
                 max_tokens=SCOUT_QUERY_MAX_TOKENS,
             )
-            query = text.strip().strip('"').strip("'")
-            return query if query else self._heuristic_query(article)
+            if text and isinstance(text, str):
+                query = text.strip().strip('"').strip("'")
+                return query if query else self._heuristic_query(article)
+            else:
+                return self._heuristic_query(article)
         except Exception as e:
             print(f"    ⚠️  Gemini query generation failed after retries: {e}")
             return self._heuristic_query(article)
@@ -242,7 +255,7 @@ class ScoutNode:
         return title[:150]
 
     # ------------------------------------------------------------------
-    # Stage 3 – DuckDuckGo search & snippet aggregation (sync, no API key needed)
+    # Stage 3 – DuckDuckGo search & snippet aggregation
     # ------------------------------------------------------------------
     def _aggregate_snippets(self, query: str) -> str:
         snippets: List[str] = []
@@ -268,39 +281,72 @@ class ScoutNode:
         return ""
 
     # ------------------------------------------------------------------
-    # Gemini helpers — async calls with retry for transient errors
+    # Gemini helpers
     # ------------------------------------------------------------------
     @_llm_retry_decorator
-    async def _call_gemini_with_retry(
-        self, model: str, prompt: str, temperature: float, max_tokens: int
+    async def _call_gemini_structured(
+        self, model: str, system_instruction: str, contents: str,
+        temperature: float, max_tokens: int, schema: type,
+    ):
+        """Call Gemini using native structured output (Pydantic schema).
+        Returns the Pydantic model instance directly — no manual JSON parsing."""
+        loop = asyncio.get_running_loop()
+
+        def _sync_call():
+            response = self._client.models.generate_content(
+                model=model,
+                contents=contents,
+                config={
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens,
+                    "system_instruction": system_instruction,
+                    "response_mime_type": "application/json",
+                    "response_schema": schema,
+                },
+            )
+            if response.text is None:
+                raise ValueError("Gemini returned None (safety-filtered response)")
+            return schema.model_validate_json(response.text)
+
+        return await loop.run_in_executor(None, _sync_call)
+
+    @_llm_retry_decorator
+    async def _call_gemini_json(
+        self, model: str, system_instruction: str, contents: str,
+        temperature: float, max_tokens: int,
     ) -> dict:
-        """Call Gemini, return parsed JSON dict. Retries on 429/503/5xx."""
-        text = await self._call_gemini_raw(model, prompt, temperature, max_tokens)
-        # Strip markdown code fences if present
-        if text.startswith("```"):
-            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        if text.startswith("json"):
-            text = text[4:].strip()
+        """Call Gemini, return parsed JSON dict (with truncation repair)."""
+        text = await self._call_gemini_text(
+            model=model,
+            system_instruction=system_instruction,
+            contents=contents,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        if text is None:
+            raise ValueError("Gemini returned None (safety-filtered response)")
         return parse_json_with_repair(text)
 
-    async def _call_gemini_raw(
-        self, model: str, prompt: str, temperature: float, max_tokens: int
-    ) -> str:
+    async def _call_gemini_text(
+        self, model: str, system_instruction: str, contents: str,
+        temperature: float, max_tokens: int,
+    ) -> Optional[str]:
         """Call Gemini and return raw text. Uses run_in_executor for the sync SDK."""
         loop = asyncio.get_running_loop()
 
         def _sync_call():
-            try:
-                response = self._client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config={"temperature": temperature, "max_output_tokens": max_tokens},
-                )
-                return response.text.strip()
-            except Exception as e:
-                # Re-raise only retryable errors; others propagate to caller
-                if _is_retryable_error(e):
-                    raise  # Let tenacity retry it
-                raise  # Propagate non-retryable errors too (caught by caller w/ heuristic fallback)
+            response = self._client.models.generate_content(
+                model=model,
+                contents=contents,
+                config={
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens,
+                    "system_instruction": system_instruction,
+                },
+            )
+            # Guard against safety-filtered responses where .text is None
+            if response.text is None:
+                return None
+            return response.text.strip()
 
         return await loop.run_in_executor(None, _sync_call)

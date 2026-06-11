@@ -12,7 +12,12 @@ overreaction or underreaction that downstream agents can act on.
 
 Concurrency: analyses articles with asyncio.gather capped by asyncio.Semaphore(N)
 to avoid overwhelming the Gemini API. Retries 429/503 with exponential backoff.
-Includes JSON truncation recovery (auto-repair missing closing brackets).
+JSON parsing uses Gemini's native structured output (Pydantic schema) to
+eliminate markdown fences, preamble contamination, and unterminated strings.
+
+System instruction is separated from user content to improve instruction
+adherence. Safety-filtered responses (text=None) are caught and fall back
+to heuristics.
 
 All tunable constants are in src/config.py.
 """
@@ -23,6 +28,7 @@ import re
 from typing import List, Optional
 
 from google import genai
+from pydantic import BaseModel, Field
 from tenacity import (
     retry,
     wait_exponential,
@@ -31,7 +37,6 @@ from tenacity import (
 )
 
 from src.state import ScoutArticle, EmotionalAnalysis
-from src.utils.json_repair import parse_json_with_repair
 from src.config import (
     GEMINI_API_KEY,
     TONALITY_GEMINI_MODEL,
@@ -45,6 +50,16 @@ from src.config import (
     TONALITY_FACTUAL_INDICATORS,
 )
 
+
+class TonalitySchema(BaseModel):
+    """Native structured output schema for Gemini tonality analysis.
+    Gemini is forced to return data matching this exact structure."""
+    emotional_score: float = Field(..., description="Emotional tone from -1.0 (fear/panic) to +1.0 (euphoria/greed)")
+    factual_score: float = Field(..., description="Factual density from 0.0 (pure opinion) to 1.0 (data-driven)")
+    tonality_label: str = Field(..., description="One of: alarmist, measured, euphoric, clinical, balanced, sensationalist")
+    reasoning: str = Field(..., description="1-2 sentence explanation of emotional/factual divergence")
+    key_emotional_phrases: List[str] = Field(default_factory=list, description="Up to 3 key emotional phrases from the text")
+    key_factual_claims: List[str] = Field(default_factory=list, description="Up to 3 key factual claims from the text")
 
 
 def _is_retryable_error(exception: Exception) -> bool:
@@ -61,10 +76,10 @@ def _llm_retry_decorator(func):
     """Exponential-backoff retry for transient Gemini errors (429/503/5xx)."""
     return retry(
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        stop=stop_after_attempt(5),
+        stop=stop_after_attempt(3),
         retry=retry_if_exception_type(Exception),
         after=lambda retry_state: print(
-            f"    🔄 Gemini retry attempt {retry_state.attempt_number}/5 "
+            f"    🔄 Gemini retry attempt {retry_state.attempt_number}/3 "
             f"(waited {retry_state.outcome_timestamp - retry_state.start_time:.1f}s) "
             f"— error was: {retry_state.outcome.exception()}"
         ) if retry_state.outcome and retry_state.outcome.failed else None,
@@ -81,6 +96,8 @@ class ToneAnalystNode:
     disparity score.
 
     Uses async concurrency with a semaphore to limit simultaneous LLM calls.
+    System instruction is separated from contents to improve adherence.
+    JSON output enforced via Gemini native structured output (Pydantic schema).
     """
 
     def __init__(self):
@@ -97,10 +114,6 @@ class ToneAnalystNode:
         sem = self._semaphore
 
         async def analyze_one(idx: int, article: ScoutArticle) -> ScoutArticle:
-            # Jittered stagger: spaces out semaphore acquisition so the API
-            # sees a gentle trickle instead of a burst. The random jitter
-            # (±0.1s around the deterministic delay) prevents Tenacity retries
-            # from re-synchronizing and spiking the API again.
             await asyncio.sleep(idx * 0.1 + random.uniform(0, 0.2))
             async with sem:
                 print(f"\n  🎭 Tone [{idx+1}/{len(articles)}] {article.title[:70]}...")
@@ -133,24 +146,21 @@ class ToneAnalystNode:
         return article
 
     # ------------------------------------------------------------------
-    # Core LLM-based analysis (async + retry + JSON repair)
+    # Core LLM-based analysis (native structured output)
     # ------------------------------------------------------------------
     async def _run_tonality_analysis(self, article: ScoutArticle) -> EmotionalAnalysis:
         if not self._client:
             return self._heuristic_tonality(article)
 
-        # Build the richest text we have — prefer aggregated content (Scout's
-        # contextual snippets) over the raw summary because it gives the LLM
-        # more data points to assess emotional vs factual framing.
         analysis_text = (
             article.aggregated_content
             or article.summary
             or (article.title or "")
         )
 
-        prompt = (
+        system_instruction = (
             "You are an expert media analyst specializing in financial journalism. "
-            "Analyze the following news article text on TWO separate dimensions:\n\n"
+            "Analyze news article text on TWO separate dimensions:\n\n"
             "1. EMOTIONAL TONE: How emotionally charged is the language? "
             "Rate from -1.0 (extreme fear/panic/doom) to +1.0 (extreme euphoria/greed/elation). "
             "0.0 means completely neutral/objective language.\n\n"
@@ -161,40 +171,33 @@ class ToneAnalystNode:
             "3. Extract up to 3 key emotional phrases and up to 3 key factual claims.\n\n"
             "4. Explain in 1-2 sentences WHY the emotional tone and factual density "
             "diverge (if they do).\n\n"
-            "Respond ONLY with valid JSON in this exact format:\n"
-            '{"emotional_score": -0.65, "factual_score": 0.3, '
-            '"tonality_label": "alarmist", '
-            '"reasoning": "The article uses vivid fear-inducing language about market crash '
-            'but cites only a single 0.3% decline as evidence.", '
-            '"key_emotional_phrases": ["panic selling", "wiped out"], '
-            '"key_factual_claims": ["S&P 500 fell 0.3%", "volume was 2.1M shares"]}\n\n'
-            "Valid tonality labels: alarmist, measured, euphoric, clinical, balanced, sensationalist\n\n"
+            "Valid tonality labels: alarmist, measured, euphoric, clinical, balanced, sensationalist"
+        )
+
+        contents = (
             f"ARTICLE TEXT:\n{analysis_text[:TONALITY_ANALYSIS_MAX_CHARS]}\n\n"
             f"Title: {article.title}\n"
             f"Source: {article.source_name} ({article.source_bucket})\n"
         )
 
         try:
-            result = await self._call_gemini_with_retry(
+            result = await self._call_gemini_structured(
                 model=TONALITY_GEMINI_MODEL,
-                prompt=prompt,
+                system_instruction=system_instruction,
+                contents=contents,
                 temperature=TONALITY_TEMPERATURE,
                 max_tokens=TONALITY_MAX_TOKENS,
+                schema=TonalitySchema,
             )
 
-            emotional_score = max(-1.0, min(1.0, float(result.get("emotional_score", 0.0))))
-            factual_score = max(0.0, min(1.0, float(result.get("factual_score", 0.5))))
+            emotional_score = max(-1.0, min(1.0, float(result.emotional_score)))
+            factual_score = max(0.0, min(1.0, float(result.factual_score)))
 
-            # Disparity = emotional magnitude scaled by how UNfactual the article is.
-            # A highly factual article (0.95) with moderate emotion (0.60) still has
-            # meaningful emotional framing: 0.60 * (1 - 0.95*0.5) = 0.60 * 0.525 ≈ 0.31
-            # This replaces the old formula max(0, abs(emotional) - factual) which
-            # zeroed out disparity for ALL wire-service articles.
             factual_dampening = max(0.0, 1.0 - factual_score * 0.5)
             disparity = max(0.0, round(abs(emotional_score) * factual_dampening, 2))
 
             valid_labels = {"alarmist", "measured", "euphoric", "clinical", "balanced", "sensationalist"}
-            tonality_label = result.get("tonality_label", "balanced")
+            tonality_label = result.tonality_label
             if tonality_label not in valid_labels:
                 tonality_label = "balanced"
 
@@ -203,9 +206,9 @@ class ToneAnalystNode:
                 factual_score=round(factual_score, 2),
                 disparity_score=disparity,
                 tonality_label=tonality_label,
-                reasoning=result.get("reasoning", ""),
-                key_emotional_phrases=result.get("key_emotional_phrases", []),
-                key_factual_claims=result.get("key_factual_claims", []),
+                reasoning=result.reasoning,
+                key_emotional_phrases=result.key_emotional_phrases,
+                key_factual_claims=result.key_factual_claims,
             )
         except Exception as e:
             print(f"    ⚠️  LLM tonality analysis failed after retries: {e}")
@@ -283,36 +286,56 @@ class ToneAnalystNode:
         )
 
     # ------------------------------------------------------------------
-    # Gemini helpers — async calls with retry for transient errors
+    # Gemini helpers
     # ------------------------------------------------------------------
     @_llm_retry_decorator
-    async def _call_gemini_with_retry(
-        self, model: str, prompt: str, temperature: float, max_tokens: int
-    ) -> dict:
-        """Call Gemini, return parsed JSON dict (with truncation repair). Retries on 429/503/5xx."""
-        text = await self._call_gemini_raw(model, prompt, temperature, max_tokens)
-        # Strip markdown code fences if present
-        if text.startswith("```"):
-            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        if text.startswith("json"):
-            text = text[4:].strip()
-        return parse_json_with_repair(text)
+    async def _call_gemini_structured(
+        self, model: str, system_instruction: str, contents: str,
+        temperature: float, max_tokens: int, schema: type,
+    ):
+        """Call Gemini using native structured output (Pydantic schema).
+        Returns the Pydantic model instance directly — no manual JSON parsing,
+        no code fence stripping, no unterminated-string repair."""
+        loop = asyncio.get_running_loop()
 
-    async def _call_gemini_raw(
-        self, model: str, prompt: str, temperature: float, max_tokens: int
-    ) -> str:
+        def _sync_call():
+            response = self._client.models.generate_content(
+                model=model,
+                contents=contents,
+                config={
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens,
+                    "system_instruction": system_instruction,
+                    "response_mime_type": "application/json",
+                    "response_schema": schema,
+                },
+            )
+            if response.text is None:
+                raise ValueError("Gemini returned None (safety-filtered response)")
+            return schema.model_validate_json(response.text)
+
+        return await loop.run_in_executor(None, _sync_call)
+
+    async def _call_gemini_text(
+        self, model: str, system_instruction: str, contents: str,
+        temperature: float, max_tokens: int,
+    ) -> Optional[str]:
         """Call Gemini and return raw text. Uses run_in_executor for the sync SDK."""
         loop = asyncio.get_running_loop()
 
         def _sync_call():
-            try:
-                response = self._client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config={"temperature": temperature, "max_output_tokens": max_tokens},
-                )
-                return response.text.strip()
-            except Exception as e:
-                raise  # Let tenacity/retry logic handle it
+            response = self._client.models.generate_content(
+                model=model,
+                contents=contents,
+                config={
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens,
+                    "system_instruction": system_instruction,
+                },
+            )
+            # Guard against safety-filtered responses where .text is None
+            if response.text is None:
+                return None
+            return response.text.strip()
 
         return await loop.run_in_executor(None, _sync_call)

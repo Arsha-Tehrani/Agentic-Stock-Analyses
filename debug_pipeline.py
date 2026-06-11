@@ -109,7 +109,7 @@ async def main():
     enriched = await scout.enrich_batch(all_articles)
     t_scout = time.monotonic() - t_scout_start
 
-    scout_ok = sum(1 for a in enriched if a.importance_score > 0.1)
+    scout_ok = sum(1 for a in enriched if a.importance_score >= 0)
     print(f"\n📊 Scout complete in {t_scout:.1f}s: {scout_ok}/{len(enriched)} articles scored")
     for a in enriched:
         print(f"  [{a.importance_score:.2f}] {a.importance_reasoning[:100]}")
@@ -183,8 +183,8 @@ async def main():
             or ra.rotation_score >= REGIME_INDIVIDUAL_TRIGGER_THRESHOLD
             or ra.emotional_arbitrage_score >= REGIME_INDIVIDUAL_TRIGGER_THRESHOLD
         )
-        print(f"  Composite trigger:        {'✅ FIRED' if composite_fired else '❌ not met'} (S>70)")
-        print(f"  Individual trigger:       {'✅ FIRED' if individual_fired else '❌ not met'} (any ≥8)")
+        print(f"  Composite trigger:        {'✅ FIRED' if composite_fired else '❌ not met'} (S>{REGIME_SIGNIFICANCE_THRESHOLD})")
+        print(f"  Individual trigger:       {'✅ FIRED' if individual_fired else '❌ not met'} (any ≥{REGIME_INDIVIDUAL_TRIGGER_THRESHOLD})")
         print(f"  Gate result:              {'🚨 PROCEED to Portfolio Manager' if ra.proceed_to_portfolio_manager else '✅ No regime change — graph ends'}")
     else:
         print("  ⚠️  Regime analysis: NONE (likely failed)")
