@@ -81,6 +81,8 @@ from src.config import (
     WIRE_API_KEY,
     REGIME_DEFAULT_MARKET_STATE,
 )
+from src.utils.json_repair import parse_json_with_repair
+import time as time_module
 
 
 # =============================================================================
@@ -207,7 +209,7 @@ class PortfolioManagerNode:
                 },
             )
             queries_text = self._strip_code_fences(response.text)
-            queries_data = json.loads(queries_text)
+            queries_data = parse_json_with_repair(queries_text)
             raw_queries = queries_data.get("queries", [])
             # Filter to clean, non-empty strings; cap at config limit
             queries = [str(q).strip() for q in raw_queries if str(q).strip()]
@@ -238,7 +240,7 @@ class PortfolioManagerNode:
                 },
             )
             synth_text = self._strip_code_fences(response.text)
-            synth_data = json.loads(synth_text)
+            synth_data = parse_json_with_repair(synth_text)
 
             targets: List[TargetStock] = []
             for t in synth_data.get("targets", []):
@@ -676,16 +678,39 @@ class PortfolioManagerNode:
             target_list, market_state, regime_analysis
         )
 
-        response = self._client.models.generate_content(
-            model=PORTFOLIO_GEMINI_MODEL,
-            contents=alloc_prompt,
-            config={
-                "temperature": PORTFOLIO_ALLOCATOR_TEMPERATURE,
-                "max_output_tokens": PORTFOLIO_ALLOCATOR_MAX_TOKENS,
-            },
-        )
-        text = self._strip_code_fences(response.text)
-        data = json.loads(text)
+        # Retry loop for allocator chain (most critical parse point)
+        max_retries = 3
+        data = None
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                response = self._client.models.generate_content(
+                    model=PORTFOLIO_GEMINI_MODEL,
+                    contents=alloc_prompt,
+                    config={
+                        "temperature": PORTFOLIO_ALLOCATOR_TEMPERATURE,
+                        "max_output_tokens": PORTFOLIO_ALLOCATOR_MAX_TOKENS,
+                    },
+                )
+                text = self._strip_code_fences(response.text)
+                data = parse_json_with_repair(text)
+                # Basic validation: must have Portfolio_Impact_Assessment
+                if "Portfolio_Impact_Assessment" not in data:
+                    raise ValueError("Missing Portfolio_Impact_Assessment in response")
+                break  # Success
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    print(f"    ⚠️  Allocator JSON parse failed (attempt {attempt+1}): {e}")
+                    print(f"       Retrying with jittered backoff...")
+                    time_module.sleep(0.5 * (attempt + 1))
+
+        if data is None:
+            print(f"    ⚠️  Allocator chain failed after {max_retries} attempts: {last_error}")
+            return self._fallback_recommendation(
+                regime_analysis,
+                reason=f"Allocator chain failed after {max_retries} attempts: {last_error}",
+            )
 
         # Validate & coerce the proposed actions
         valid_actions = self._validate_proposed_actions(

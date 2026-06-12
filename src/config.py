@@ -34,8 +34,8 @@ SCOUT_SUMMARY_MAX_CHARS = 300      # Fallback: chars taken from content when sum
 
 # Gemini importance evaluation
 SCOUT_IMPORTANCE_TEMPERATURE = 0.1  # Low temp for consistent scoring
-SCOUT_IMPORTANCE_MAX_TOKENS = 100   # Enough for a short JSON response
-SCOUT_IMPORTANCE_PROMPT_CHARS = 500  # Max summary chars fed into the importance prompt
+SCOUT_IMPORTANCE_MAX_TOKENS = 800   # Enough for a short JSON response
+SCOUT_IMPORTANCE_PROMPT_CHARS = 1500  # Max summary chars fed into the importance prompt
 
 # Gemini search-query generation
 SCOUT_QUERY_TEMPERATURE = 0.2
@@ -64,7 +64,7 @@ SCOUT_CONCURRENCY_LIMIT = 5           # Max concurrent Gemini/DDG calls in Scout
 DISPARITY_THRESHOLD = 0.35          # Disparity ≥ this triggers cluster search
 TONE_CONCURRENCY_LIMIT = 5          # Max concurrent Gemini calls in ToneAnalystNode
 TONALITY_TEMPERATURE = 0.15         # Low temp for consistent tonality scores
-TONALITY_MAX_TOKENS = 2000          # Room for JSON + reasoning + 6 phrase/claim arrays (was 800)
+TONALITY_MAX_TOKENS = 3000          # Room for JSON + reasoning + 6 phrase/claim arrays (was 2000)
 TONALITY_ANALYSIS_MAX_CHARS = 3000  # Max text chars fed into the tonality prompt
 
 # Heuristic tonality fallback keywords
@@ -118,8 +118,8 @@ REGIONAL_FEEDS = {
 # =============================================================================
 # Ingestor Limits — max articles fetched per source per run
 # =============================================================================
-WIRE_MAX_ARTICLES = 20       # Finnhub wire headlines
-RSS_MAX_PER_FEED = 10        # Regional RSS feed entries per source
+WIRE_MAX_ARTICLES = 30       # Finnhub wire headlines
+RSS_MAX_PER_FEED = 20        # Regional RSS feed entries per source
 
 # =============================================================================
 # Regime Analyst – Capital Rotation & Macro Regime Detection
@@ -233,9 +233,9 @@ DISPARITY_HIGH_THRESHOLD = 0.35      # Articles with disparity ≥ this are "hig
 # Researcher chain: needs creative proxy discovery → higher temperature.
 # Allocator chain:  needs deterministic portfolio math → lower temperature.
 PORTFOLIO_RESEARCHER_TEMPERATURE = 0.4
-PORTFOLIO_RESEARCHER_MAX_TOKENS = 600
+PORTFOLIO_RESEARCHER_MAX_TOKENS = 6000
 PORTFOLIO_ALLOCATOR_TEMPERATURE = 0.15
-PORTFOLIO_ALLOCATOR_MAX_TOKENS = 1000
+PORTFOLIO_ALLOCATOR_MAX_TOKENS = 6000
 
 # DuckDuckGo (ddgs) execution parameters for the Researcher
 PORTFOLIO_DDG_MAX_RESULTS = 5        # Snippets per query

@@ -12,6 +12,7 @@ Token cost: ~3/32 ≈ 9% of a full run. No database writes.
 """
 
 import asyncio
+import json
 import time
 from typing import List
 
@@ -20,11 +21,11 @@ from src.ingestors.WireIngestor import WireIngestor
 from src.ingestors.MacroBlogs import MacroBlogIngestor
 from src.ingestors.GlobalOutlets import RegionalRSSIngestor
 from src.db.DatabaseSink import DatabaseSink
-from src.agents.ScoutNode import ScoutNode, ScoutArticle
+from src.agents.ScoutNode import ScoutNode
 from src.agents.ToneAnalystNode import ToneAnalystNode
 from src.agents.ClusterFinder import ClusterFinder
 from src.agents.RegimeAnalystNode import RegimeAnalystNode
-from src.state import GraphState
+from src.state import GraphState, ScoutArticle, EmotionalAnalysis
 from src.config import (
     WIRE_API_KEY,
     BLOG_TARGETS,
@@ -39,8 +40,11 @@ from src.config import (
 )
 
 # ── Debug config ──────────────────────────────────────────────────────────
-DEBUG_ARTICLE_COUNT = 3   # How many articles to run through the pipeline
-SKIP_DB = True            # Don't touch the database at all
+DEBUG_ARTICLE_COUNT = 5   # How many articles to run through the pipeline
+# Articles are persisted to the database (with dedup by URL) so that
+# saved articles can be re-used by debug_portfolio_manager.py later.
+# Set SKIP_DB=True to skip database writes during quick iteration.
+SKIP_DB = False           # Set True to skip database writes entirely
 # ───────────────────────────────────────────────────────────────────────────
 
 DIVIDER = "=" * 60
@@ -99,18 +103,70 @@ async def main():
     for i, a in enumerate(all_articles):
         print(f"  [{i+1}] {a.title[:80]} | {a.source_name} ({a.source_bucket})")
 
-    # ── 3. Scout enrichment ────────────────────────────────────────────
+    # ── Filter out already-enriched articles ───────────────────────────
+    if not SKIP_DB:
+        print("\n" + DIVIDER)
+        print("🔍 Phase 2: Checking for already-enriched articles in database...")
+        print(DIVIDER)
+        db_sink_check = DatabaseSink()
+        articles_to_process: List[NewsArticle] = []
+        articles_from_db: List[ScoutArticle] = []
+        for a in all_articles:
+            if a.url and db_sink_check.is_article_enriched(a.url):
+                db_row = db_sink_check.fetch_enriched_article(a.url)
+                if db_row:
+                    print(f"  ⏭️  Already enriched: {a.title[:60]}... (loading from DB)")
+                    # Reconstruct ScoutArticle from the DB row
+                    sa = ScoutArticle(
+                        source_bucket=db_row.get("source_bucket", a.source_bucket),
+                        source_name=db_row.get("source_name", a.source_name),
+                        title=db_row.get("title", a.title),
+                        summary=db_row.get("summary", a.summary) or "",
+                        url=db_row.get("url", a.url),
+                        timestamp=a.timestamp,
+                        ticker_tags=json.loads(db_row["ticker_tags"]) if isinstance(db_row.get("ticker_tags"), str) else (db_row.get("ticker_tags") or a.ticker_tags),
+                        importance_score=db_row.get("importance_score", 0.0) or 0.0,
+                        importance_reasoning="Loaded from DB (previously enriched)",
+                        aggregated_content=db_row.get("content", "") or "",
+                        emotional_analysis=EmotionalAnalysis(
+                            emotional_score=db_row["emotional_score"],
+                            factual_score=db_row["factual_score"] if db_row.get("factual_score") is not None else 0.0,
+                            disparity_score=db_row["disparity_score"] if db_row.get("disparity_score") is not None else 0.0,
+                            tonality_label=db_row.get("tonality_label", "unknown") or "unknown",
+                            reasoning=db_row.get("emotional_reasoning", "") or "",
+                            key_emotional_phrases=(
+                                json.loads(db_row["emotional_phrases"]) if isinstance(db_row.get("emotional_phrases"), str) else (db_row.get("emotional_phrases") or [])
+                            ),
+                            key_factual_claims=(
+                                json.loads(db_row["factual_claims"]) if isinstance(db_row.get("factual_claims"), str) else (db_row.get("factual_claims") or [])
+                            ),
+                        ) if db_row.get("emotional_score") is not None else None,
+                    )
+                    articles_from_db.append(sa)
+                else:
+                    articles_to_process.append(a)
+            else:
+                articles_to_process.append(a)
+        print(f"  → {len(articles_to_process)} new article(s) to process, {len(articles_from_db)} already enriched (skipped)")
+    else:
+        articles_to_process = list(all_articles)
+        articles_from_db = []
+
+    # ── 3. Scout enrichment (only for new articles) ────────────────────
     print("\n" + DIVIDER)
-    print("🔍 Phase 2: Scout enrichment (importance scoring + DDG context)")
+    print("🔍 Phase 3: Scout enrichment (importance scoring + DDG context)")
     print(DIVIDER)
 
     t_scout_start = time.monotonic()
     scout = ScoutNode()
-    enriched = await scout.enrich_batch(all_articles)
+    newly_enriched = await scout.enrich_batch(articles_to_process)
+    # Merge: DB-loaded articles come first, then newly enriched
+    enriched = articles_from_db + newly_enriched
     t_scout = time.monotonic() - t_scout_start
 
-    scout_ok = sum(1 for a in enriched if a.importance_score >= 0)
-    print(f"\n📊 Scout complete in {t_scout:.1f}s: {scout_ok}/{len(enriched)} articles scored")
+    scout_ok = sum(1 for a in enriched if a.importance_score >= 0.0)
+    print(f"\n📊 Scout complete in {t_scout:.1f}s: {scout_ok}/{len(enriched)} articles scored "
+          f"({len(articles_from_db)} from DB)")
     for a in enriched:
         print(f"  [{a.importance_score:.2f}] {a.importance_reasoning[:100]}")
 
@@ -135,16 +191,52 @@ async def main():
             ea = a.emotional_analysis
             print(f"  [{ea.tonality_label:>12s}] e={ea.emotional_score:+.2f} f={ea.factual_score:.2f} disp={ea.disparity_score:.2f} | {ea.reasoning[:80]}")
 
+    # ── DB Persistence (unless SKIP_DB is set) ─────────────────────────
+    if not SKIP_DB:
+        # 5a. Persist raw articles after Scout enrichment (dedup by URL)
+        print("\n" + DIVIDER)
+        print("💾 Phase 4a: Persisting articles to database...")
+        print(DIVIDER)
+        db_sink = DatabaseSink()
+        # Convert ScoutArticle -> NewsArticle for the raw insert
+        raw_for_db: List[NewsArticle] = []
+        for sa in enriched:
+            raw_for_db.append(NewsArticle(
+                source_bucket=sa.source_bucket,
+                source_name=sa.source_name,
+                title=sa.title,
+                content=sa.aggregated_content or sa.summary or "",
+                summary=sa.summary or "",
+                url=sa.url,
+                timestamp=sa.timestamp,
+                ticker_tags=sa.ticker_tags,
+                importance_score=sa.importance_score,
+            ))
+        inserted = db_sink.insert_articles_batch(raw_for_db)
+        print(f"  Debug DB: {inserted} new article(s) saved (duplicates skipped).")
+    else:
+        print("\n  ⏭️  SKIP_DB=True — skipping database writes.")
+
     # ── 5. Cluster search ──────────────────────────────────────────────
     print("\n" + DIVIDER)
-    print("🔗 Phase 4: Cluster search (related article discovery)")
+    print("🔗 Phase 4b: Cluster search (related article discovery)")
     print(DIVIDER)
 
-    db_sink = DatabaseSink()
+    if SKIP_DB:
+        # Need a db_sink anyway for the cluster finder even in skip mode
+        db_sink = DatabaseSink()
     cluster_finder = ClusterFinder(db_sink=db_sink, tone_analyst=tone_analyst)
     enriched = await cluster_finder.find_clusters(enriched)
     clustered = sum(1 for a in enriched if a.related_articles)
     print(f"\n📊 Cluster search complete: {clustered}/{len(enriched)} articles have related coverage")
+
+    # ── Backfill enrichment data into DB (unless SKIP_DB) ──
+    if not SKIP_DB:
+        print("\n" + DIVIDER)
+        print("💾 Phase 4c: Backfilling emotional enrichment data...")
+        print(DIVIDER)
+        enrichment_updated = db_sink.update_article_enrichment(enriched)
+        print(f"  Debug DB: {enrichment_updated} article(s) enriched.")
 
     # ── 6. Regime Analyst ──────────────────────────────────────────────
     print("\n" + DIVIDER)

@@ -7,6 +7,7 @@ Usage:
 """
 
 import asyncio
+import sqlite3
 from typing import List
 
 from src.NewsArticle import NewsArticle
@@ -73,6 +74,16 @@ async def main_pipeline() -> List[ScoutArticle]:
 
     print(f"\n✅ Validation complete. {len(all_articles)} unique articles ready.")
 
+    # ── IMMEDIATE PERSISTENCE: Save raw articles before any enrichment ──
+    # This guarantees every parsed article survives to the database even if
+    # Scout, ToneAnalyst, or ClusterFinder crashes partway through.
+    print("\n" + "=" * 60)
+    print("💾 Persisting raw articles to database (before enrichment)...")
+    print("=" * 60)
+
+    db_sink = DatabaseSink()
+    rows_inserted = db_sink.insert_articles(all_articles)
+
     print("\n" + "=" * 60)
     print("🔍 Scout enrichment phase — evaluating importance & gathering context...")
     print("=" * 60)
@@ -91,9 +102,14 @@ async def main_pipeline() -> List[ScoutArticle]:
     print("🔗 Cluster search — finding related articles for high-disparity pieces...")
     print("=" * 60)
 
-    db_sink = DatabaseSink()
     cluster_finder = ClusterFinder(db_sink=db_sink, tone_analyst=tone_analyst)
     enriched_articles = await cluster_finder.find_clusters(enriched_articles)
+
+    # ── Backfill enrichment data into existing DB rows ──
+    print("\n" + "=" * 60)
+    print("💾 Backfilling enrichment data (emotional analysis) into database...")
+    print("=" * 60)
+    enrichment_updated = db_sink.update_article_enrichment(enriched_articles)
 
     # ── Build NewsArticle list with emotional analysis data for DB persistence ──
     db_articles: List[NewsArticle] = []
@@ -119,11 +135,6 @@ async def main_pipeline() -> List[ScoutArticle]:
             article.factual_claims = sa.emotional_analysis.key_factual_claims
         db_articles.append(article)
 
-    print("\n" + "=" * 60)
-    print("💾 Persisting enriched articles to database...")
-    print("=" * 60)
-
-    rows_inserted = db_sink.insert_articles(db_articles)
 
     # ── Load portfolio state from database (or initialize from config) ──
     print("\n" + "=" * 60)
@@ -218,13 +229,21 @@ async def main_pipeline() -> List[ScoutArticle]:
     high_importance = sum(1 for a in db_articles if a.importance_score and a.importance_score >= IMPORTANCE_HIGH_THRESHOLD)
     high_disparity = sum(1 for a in enriched_articles if a.emotional_analysis and a.emotional_analysis.disparity_score >= DISPARITY_HIGH_THRESHOLD)
     clustered = sum(1 for a in enriched_articles if a.related_articles)
+    # Query significant_articles count directly from the database (more reliable than local var)
+    try:
+        conn = sqlite3.connect(db_sink.db_path)
+        sig_count = conn.execute("SELECT COUNT(*) FROM significant_articles").fetchone()[0]
+        conn.close()
+    except Exception:
+        sig_count = significant_count  # fallback to local var if table doesn't exist
 
     print(f"\n📊 Database summary: {total_in_db} articles total in data/news.db")
     print(f"   High-importance (≥{IMPORTANCE_HIGH_THRESHOLD}):      {high_importance}")
     print(f"   High emotional disparity:    {high_disparity}")
     print(f"   Articles with clusters:      {clustered}")
-    print(f"   Significant articles saved:  {significant_count}")
+    print(f"   Significant articles saved:  {sig_count}")
     print(f"   Scout-enriched:              {len(enriched_articles)}")
+    print(f"   Enrichment rows backfilled:  {enrichment_updated}")
     print("=" * 60)
     print("Pipeline finished. Regime-analyzed articles ready for review.")
     print("=" * 60)

@@ -2,9 +2,10 @@
 -- Schema for news article persistence and downstream filtering.
 -- This SQLite database stores articles from all three ingestion buckets:
 --   Wires, Macro_Blogs, and Regional.
-
--- Drop if re-running
-DROP TABLE IF EXISTS articles;
+--
+-- NOTE: DROP TABLE statements have been moved to news_reset.sql.
+-- This file only runs CREATE TABLE IF NOT EXISTS so data persists
+-- across pipeline runs. To wipe and re-initialize, run news_reset.sql.
 
 CREATE TABLE IF NOT EXISTS articles (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,8 +43,6 @@ CREATE INDEX IF NOT EXISTS idx_articles_timestamp ON articles(timestamp);
 -- Significant Articles — articles that triggered a regime change
 -- (Regime Analyst significance score > threshold)
 -- ---------------------------------------------------------------
-DROP TABLE IF EXISTS significant_articles;
-
 CREATE TABLE IF NOT EXISTS significant_articles (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     article_id      INTEGER NOT NULL,             -- FK to articles.id
@@ -94,8 +93,6 @@ CREATE INDEX IF NOT EXISTS idx_significant_timestamp ON significant_articles(tim
 -- by the Portfolio Manager → Reviewer → Human approval workflow.
 -- It's a singleton table (only one row with id=1).
 -- -------------------------------------------------------------------
-DROP TABLE IF EXISTS portfolio_state;
-
 CREATE TABLE IF NOT EXISTS portfolio_state (
     id                      INTEGER PRIMARY KEY CHECK (id = 1),  -- Singleton row
     timestamp               TEXT    NOT NULL,                     -- ISO-8601 datetime of state
@@ -113,8 +110,6 @@ CREATE INDEX IF NOT EXISTS idx_portfolio_updated_at ON portfolio_state(updated_a
 -- Portfolio State History — tracks all changes to portfolio state
 -- for audit and rollback purposes
 -- -------------------------------------------------------------------
-DROP TABLE IF EXISTS portfolio_state_history;
-
 CREATE TABLE IF NOT EXISTS portfolio_state_history (
     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
     portfolio_state_id      INTEGER NOT NULL,                       -- FK to portfolio_state.id
@@ -130,10 +125,3 @@ CREATE TABLE IF NOT EXISTS portfolio_state_history (
 
 CREATE INDEX IF NOT EXISTS idx_portfolio_history_created_at ON portfolio_state_history(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_portfolio_history_state_id ON portfolio_state_history(portfolio_state_id);
-
-
--- -------------------------------------------------------------------
--- INSERT statement (used by DatabaseSink.py via parameterised query)
--- -------------------------------------------------------------------
--- INSERT INTO articles
---     (source_bucket, source_name, title, content, url, timestamp, ticker_tags)

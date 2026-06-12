@@ -27,6 +27,7 @@ from typing import List, Optional
 
 from ddgs import DDGS
 from google import genai
+from google.genai import types
 from pydantic import BaseModel, Field
 from tenacity import (
     retry,
@@ -293,19 +294,31 @@ class ScoutNode:
         loop = asyncio.get_running_loop()
 
         def _sync_call():
+            config = types.GenerateContentConfig(
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+                system_instruction=system_instruction,
+                response_mime_type="application/json",
+                response_schema=schema,
+            )
+
             response = self._client.models.generate_content(
                 model=model,
                 contents=contents,
-                config={
-                    "temperature": temperature,
-                    "max_output_tokens": max_tokens,
-                    "system_instruction": system_instruction,
-                    "response_mime_type": "application/json",
-                    "response_schema": schema,
-                },
+                config=config,
             )
+
+            print("\n--- DEBUG: GEMINI STRUCTURED OUTPUT ---")
+            print(f"RAW TEXT RESPONSE:\n{response.text}")
+            print(f"DID SDK AUTO-PARSE?: {hasattr(response, 'parsed') and response.parsed is not None}")
+            print("---------------------------------------\n")
+
             if response.text is None:
                 raise ValueError("Gemini returned None (safety-filtered response)")
+
+            if response.parsed:
+                return response.parsed
+
             return schema.model_validate_json(response.text)
 
         return await loop.run_in_executor(None, _sync_call)

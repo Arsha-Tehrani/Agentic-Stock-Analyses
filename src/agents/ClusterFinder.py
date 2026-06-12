@@ -101,6 +101,38 @@ class ClusterFinder:
             limit=CLUSTER_MAX_RELATED,
         )
 
+        # If primary keyword search returned 0 results, try a broader word-based fallback
+        if not raw_articles:
+            print(f"      ⏩ Primary keyword search (using phrases/claims) returned 0 results.")
+            print(f"      ⏩ Trying broader word-level fallback with top keywords...")
+            # Use the top 10 single words from the keyword list (tickers + longest words)
+            word_fallback = []
+            for kw in keywords:
+                if kw.upper() == kw and len(kw) <= 5:
+                    # Ticker symbol (all uppercase, short) — high signal
+                    word_fallback.append(kw)
+                elif len(kw) >= 6:
+                    word_fallback.append(kw)
+                if len(word_fallback) >= 10:
+                    break
+            # If we still have nothing useful, use title words
+            if len(word_fallback) < 3:
+                title_words = [
+                    w.strip(".,;:'\"()[]{}!?").lower()
+                    for w in article.title.split()
+                    if len(w.strip(".,;:'\"()[]{}!?")) >= 5
+                ]
+                word_fallback.extend(title_words[:8])
+
+            if word_fallback:
+                print(f"      ⏩ Fallback keywords: {word_fallback[:8]}")
+                raw_articles = self._db.find_related_by_keywords(
+                    keywords=word_fallback,
+                    exclude_url=article.url,
+                    days_window=CLUSTER_DAYS_WINDOW,
+                    limit=CLUSTER_MAX_RELATED,
+                )
+
         # Convert NewsArticle -> ScoutArticle (lightweight, no Scout enrichment needed)
         related: List[ScoutArticle] = []
         for raw in raw_articles:
@@ -116,6 +148,9 @@ class ClusterFinder:
                 importance_score=raw.importance_score or 0.0,
             ))
 
+        if not related:
+            print(f"      ⚠️  Keywords searched: {keywords[:10]}")
+            print(f"      ⚠️  Fallback tried: {word_fallback[:8] if word_fallback else 'none'}")
         return related
 
     # ------------------------------------------------------------------

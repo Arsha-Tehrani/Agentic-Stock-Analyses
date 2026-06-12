@@ -16,9 +16,14 @@ _SQL_PATH = os.path.join(_DB_DIR, "news.sql")
 
 
 class DatabaseSink:
+    # Class-level flag so schema is only initialized once per process
+    _schema_initialized = False
+
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
-        self._init_schema()
+        if not DatabaseSink._schema_initialized:
+            self._init_schema()
+            DatabaseSink._schema_initialized = True
 
     def _init_schema(self):
         with open(_SQL_PATH, "r") as f:
@@ -37,6 +42,31 @@ class DatabaseSink:
             conn.commit()
         finally:
             conn.close()
+
+    @staticmethod
+    def reset_schema(db_path: str = DB_PATH):
+        """
+        Destructive reset — DROPs all tables and re-creates them.
+        Useful for testing. Re-initializes the class-level flag so
+        the next DatabaseSink() call re-runs _init_schema.
+        """
+        reset_sql_path = os.path.join(os.path.dirname(_SQL_PATH), "news_reset.sql")
+        if not os.path.exists(reset_sql_path):
+            raise FileNotFoundError(
+                f"Reset SQL file not found at {reset_sql_path}. "
+                "Run 'sqlite3 data/news.db < data/news_reset.sql' manually."
+            )
+        with open(reset_sql_path, "r") as f:
+            raw_sql = f.read()
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executescript(raw_sql)
+            conn.commit()
+        finally:
+            conn.close()
+        DatabaseSink._schema_initialized = False
+        print(f"  🔄 Database schema reset at {db_path}")
 
     def insert_articles(self, articles: List[NewsArticle]) -> int:
         conn = sqlite3.connect(self.db_path)
@@ -112,6 +142,42 @@ class DatabaseSink:
              getattr(article, 'factual_claims', None) if getattr(article, 'factual_claims', None) is None else json.dumps(getattr(article, 'factual_claims', [])),
              ),
         )
+
+    def is_article_enriched(self, url: Optional[str]) -> bool:
+        """
+        Check if an article URL already exists in the database with
+        emotional analysis data populated. Used to skip re-enrichment.
+
+        Returns True if the article exists AND has emotional_score set.
+        """
+        if not url:
+            return False
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                "SELECT 1 FROM articles WHERE url = ? AND emotional_score IS NOT NULL LIMIT 1",
+                (url,),
+            )
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+
+    def fetch_enriched_article(self, url: str) -> Optional[dict]:
+        """
+        Load a fully enriched article from the database by URL.
+        Returns a dict with all columns, or None if not found.
+        The dict can be used to reconstruct a ScoutArticle.
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT * FROM articles WHERE url = ? LIMIT 1",
+                (url,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
 
     def fetch_recent(self, limit: int = 20) -> List[NewsArticle]:
         conn = sqlite3.connect(self.db_path)
@@ -228,6 +294,8 @@ class DatabaseSink:
         Regime metrics for later manual analysis.
 
         Uses the article_id FK from the main articles table.
+        Uses URL-based lookup for both the article ID and the
+        ScoutArticle (instead of fragile index-based mapping).
         """
         from src.state import ScoutArticle, RegimeAnalysis  # noqa: F811
 
@@ -240,13 +308,23 @@ class DatabaseSink:
             for row in cursor:
                 url_to_id[row[1]] = row[0]
 
+            # Build URL-to-ScoutArticle lookup (instead of index-based mapping)
+            url_to_scout: dict = {}
+            for sa in signed_articles:
+                if sa.url:
+                    url_to_scout[sa.url] = sa
+
             for i, article in enumerate(articles):
                 article_id = url_to_id.get(article.url)
                 if not article_id:
+                    print(f"    ⚠️  No article ID found for URL: {str(article.url)[:70]}... skipping")
                     continue
 
-                # Get corresponding ScoutArticle for tonality/cluster data
-                sa = signed_articles[i] if i < len(signed_articles) else None
+                # Use URL-based lookup for ScoutArticle (fixes index mismatch bugs)
+                sa = url_to_scout.get(article.url)
+                if not sa:
+                    print(f"    ⚠️  No ScoutArticle found for URL: {str(article.url)[:70]}... skipping")
+                    continue
 
                 emotional_score = getattr(article, 'emotional_score', None)
                 factual_score = getattr(article, 'factual_score', None)
@@ -308,6 +386,54 @@ class DatabaseSink:
 
         print(f"  📋 {inserted} article(s) saved to significant_articles table for later analysis")
         return inserted
+
+    def update_article_enrichment(
+        self, signed_articles: List["ScoutArticle"]
+    ) -> int:
+        """
+        Backfill emotional analysis data into the articles table after
+        ToneAnalyst and ClusterFinder have completed.
+
+        Matches rows by URL and UPDATEs emotional_score, factual_score,
+        disparity_score, tonality_label, emotional_reasoning,
+        emotional_phrases, and factual_claims.
+
+        Args:
+            signed_articles: List of ScoutArticle objects with emotional_analysis set.
+
+        Returns:
+            Number of rows updated.
+        """
+        conn = sqlite3.connect(self.db_path)
+        updated = 0
+        try:
+            for sa in signed_articles:
+                if not sa.url or not sa.emotional_analysis:
+                    continue
+                ea = sa.emotional_analysis
+                cursor = conn.execute(
+                    "UPDATE articles SET "
+                    "  emotional_score = ?, factual_score = ?, disparity_score = ?,"
+                    "  tonality_label = ?, emotional_reasoning = ?,"
+                    "  emotional_phrases = ?, factual_claims = ?"
+                    " WHERE url = ?",
+                    (
+                        ea.emotional_score,
+                        ea.factual_score,
+                        ea.disparity_score,
+                        ea.tonality_label,
+                        ea.reasoning,
+                        json.dumps(ea.key_emotional_phrases) if ea.key_emotional_phrases else None,
+                        json.dumps(ea.key_factual_claims) if ea.key_factual_claims else None,
+                        sa.url,
+                    ),
+                )
+                updated += cursor.rowcount
+            conn.commit()
+        finally:
+            conn.close()
+        print(f"  💾 {updated} article enrichment(s) updated in {self.db_path}")
+        return updated
 
     def fetch_significant_articles(
         self, limit: int = 50
