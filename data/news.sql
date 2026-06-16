@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS portfolio_state (
     macro_baseline          TEXT    NOT NULL,                     -- JSON object
     portfolio_allocations   TEXT    NOT NULL,                     -- JSON object (full structure)
     updated_at              TEXT    NOT NULL DEFAULT (datetime('now')),
-    updated_by              TEXT    NOT NULL CHECK (updated_by IN ('human', 'portfolio_manager', 'reviewer', 'system')),
+    updated_by              TEXT    NOT NULL CHECK (updated_by IN ('human', 'portfolio_manager', 'reviewer', 'system', 'slack_gateway', 'slack_debug')),
     version                 INTEGER NOT NULL DEFAULT 1            -- Version number for tracking changes
 );
 
@@ -125,3 +125,21 @@ CREATE TABLE IF NOT EXISTS portfolio_state_history (
 
 CREATE INDEX IF NOT EXISTS idx_portfolio_history_created_at ON portfolio_state_history(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_portfolio_history_state_id ON portfolio_state_history(portfolio_state_id);
+
+
+-- -------------------------------------------------------------------
+-- Pending User Theses — user-submitted research theses from Slack
+-- The pipeline reads-and-deletes from this staging table atomically
+-- so no thesis is processed twice.
+-- -------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS pending_user_theses (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker          TEXT    NOT NULL,
+    core_argument   TEXT    NOT NULL,
+    time_horizon    TEXT    NOT NULL CHECK(time_horizon IN ('SHORT_TERM_MOMENTUM', 'LONG_TERM_HOLD')),
+    raw_message     TEXT    NOT NULL,
+    timestamp       TEXT    NOT NULL,
+    ingested_at     TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_theses_timestamp ON pending_user_theses(timestamp DESC);

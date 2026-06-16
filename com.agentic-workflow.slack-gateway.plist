@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.agentic-workflow.slack-gateway</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/arshatehrani/Documents/Agentic_Workflow/.venv/bin/python</string>
+        <string>-m</string>
+        <string>src.utils.slack_gateway</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/arshatehrani/Documents/Agentic_Workflow</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SLACK_BOT_TOKEN</key>
+        <string>__FILL_IN_YOUR_SLACK_BOT_TOKEN__</string>
+        <key>SLACK_APP_TOKEN</key>
+        <string>__FILL_IN_YOUR_SLACK_APP_TOKEN__</string>
+        <key>GEMINI_API_KEY</key>
+        <string>__FILL_IN_YOUR_GEMINI_API_KEY__</string>
+        <key>SLACK_OUTPUT_CHANNEL_ID</key>
+        <string>__FILL_IN_YOUR_OUTPUT_CHANNEL_ID__</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/arshatehrani/Library/Logs/slack-gateway/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/arshatehrani/Library/Logs/slack-gateway/stderr.log</string>
+</dict>
+</plist>

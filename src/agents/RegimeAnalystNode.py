@@ -445,9 +445,16 @@ class RegimeAnalystNode:
 def route_after_regime_analyst(state: GraphState) -> str:
     """
     Conditional edge function for LangGraph.
-    Returns 'agent_3' if the regime analysis indicates portfolio manager
-    action is needed, otherwise returns 'end'.
+    Returns 'portfolio_manager' if:
+      1. The regime analysis indicates portfolio manager action is needed, OR
+      2. User theses from Slack gateway are pending (force_trigger_pm or user_theses populated),
+         bypassing the significance-score gate entirely.
+    Otherwise returns '__end__'.
     """
+    # Check for forced PM trigger (user theses from Slack gateway)
+    if state.get("force_trigger_pm", False) or state.get("user_theses"):
+        return "portfolio_manager"
+    # Standard regime-significance-based routing
     if state.get("proceed_to_portfolio_manager", False):
         return "portfolio_manager"
     return "__end__"

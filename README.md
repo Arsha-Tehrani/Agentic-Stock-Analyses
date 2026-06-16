@@ -1,8 +1,157 @@
 # Agentic Workflow
 
-Multi-bucket news ingestion pipeline with Scout enrichment, emotional tonality analysis, related-article clustering, and Regime Analyst for detecting capital rotation and macro regime changes.
+Multi-bucket news ingestion pipeline with Scout enrichment, emotional tonality analysis, related-article clustering, Regime Analyst for detecting capital rotation and macro regime changes, and **Slack Ingestion Gateway** for receiving trade signals and research theses via natural language.
 
 **Async concurrency** across all agents (`asyncio.gather` + `asyncio.Semaphore`), **native Gemini structured output** (Pydantic schemas + `response_mime_type="application/json"`), and **exponential-backoff retry** for transient API errors.
+
+## System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  24/7 Slack Ingestion Gateway                     │
+│  (src/utils/slack_gateway.py — Socket Mode, event-driven)        │
+│                                                                   │
+│  DM / Mention ──> Gemini 2.5 Flash ──> ┌── TRADE  ──> SQLite     │
+│  (from phone)       (classification)    ├── THESIS ──> staging    │
+│                                         └── NOISE  ──> discard    │
+└────────────────────┬────────────────────────────────────────────┘
+                     │  Pending theses read on next pipeline run
+                     ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              Daily Pipeline (run_pipeline.py)                     │
+│                                                                   │
+│ 1. Hydrate pending user theses from SQLite                        │
+│ 2. Fetch news from Finnhub / blogs / RSS                          │
+│ 3. Scout enrichment (importance + DDG context)                    │
+│ 4. Emotional tonality analysis                                    │
+│ 5. ClusterFinder (related articles)                               │
+│ 6. Regime Analyst (macro shift detection)                         │
+│ 7. Portfolio Manager (Researcher + Book Runner)                   │
+│ 8. Risk Reviewer (critic + revision loop)                         │
+│ 9. ✅ SlackOutputReporter posts results to #portfolio-updates     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Slack Ingestion Gateway
+
+The gateway runs 24/7 as a background process using **Slack Socket Mode**. It sits completely idle (zero CPU, zero API calls) until you send it a message. When you do:
+
+1. Slack pushes the message over the WebSocket connection
+2. `gemini-2.5-flash` classifies it using native structured output
+3. The gateway routes based on signal type:
+   - **TRADE** — Directly modifies the live `portfolio_allocations` in SQLite (immediate effect)
+   - **THESIS** — Stores structured record in `pending_user_theses` staging table
+   - **NOISE** — Discards with a helpful reply
+4. Replies to you on Slack with confirmation
+
+### Signal Classification Examples
+
+| You Slack | Classification | Result |
+|-----------|---------------|--------|
+| "EXPAND TSLA, momentum is strong" | TRADE | Portfolio updated immediately |
+| "Sold 3 shares of Tesla, want less exposure" | TRADE (DILUTE) | LLM infers the action |
+| "I think PLTR is undervalued because government contracts are expanding" | THESIS | Stored for next pipeline run |
+| "Good morning!" | NOISE | Discarded |
+
+## Slack Output Reporter
+
+After every pipeline run, the `SlackOutputReporter` posts a formatted summary to a **separate Slack channel** (e.g. `#portfolio-updates`) so you see daily results without digging through log files. Uses Slack Block Kit for clean formatting (ticker, action, reasoning, narrative analysis).
+
+## Quick Start
+
+```bash
+# 1. Activate virtual environment
+source .venv/bin/activate
+
+# 2. Set API keys
+export GEMINI_API_KEY="your_gemini_key_here"
+export FINNHUB_API_KEY="your_finnhub_key_here"
+export SLACK_BOT_TOKEN="your-bot-token"
+export SLACK_APP_TOKEN="your-app-token"
+export SLACK_OUTPUT_CHANNEL_ID="C01234ABCDEF"
+
+# 3a. Run the ingestion gateway (24/7 listener)
+python -m src.utils.slack_gateway
+
+# 3b. In another terminal, run the daily pipeline
+python3 run_pipeline.py
+```
+
+## Deployment to External System
+
+### Prerequisites
+
+- Python 3.11+
+- A Slack Bot with Socket Mode enabled (see setup below)
+- A Gemini API key
+- pip dependencies installed
+
+### Transfer Steps
+
+```bash
+# 1. Copy the project to your external machine
+rsync -avz --exclude '.venv' --exclude 'data/news.db' \
+  /Users/arshatehrani/Documents/Agentic_Workflow/ \
+  user@your-server:~/Agentic_Workflow/
+
+# 2. On the external machine, set up and install
+cd ~/Agentic_Workflow
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 3. Set environment variables (or use data/slack_gateway.env)
+export SLACK_BOT_TOKEN="xoxb-..."
+export SLACK_APP_TOKEN="xapp-..."
+export GEMINI_API_KEY="..."
+export SLACK_OUTPUT_CHANNEL_ID="C01234ABCDEF"
+
+# 4. Start the 24/7 Slack listener
+nohup python -m src.utils.slack_gateway > gateway.log 2>&1 &
+
+# 5. Schedule the daily pipeline (cron)
+#    crontab -e
+#    0 9 * * * cd ~/Agentic_Workflow && source .venv/bin/activate && python3 run_pipeline.py >> pipeline.log 2>&1
+```
+
+### macOS launchd Service (for macOS always-on machines)
+
+```bash
+# 1. Edit the plist with your tokens
+nano com.agentic-workflow.slack-gateway.plist
+
+# 2. Copy to LaunchAgents
+cp com.agentic-workflow.slack-gateway.plist ~/Library/LaunchAgents/
+
+# 3. Load it (starts now + auto-starts on boot)
+launchctl load ~/Library/LaunchAgents/com.agentic-workflow.slack-gateway.plist
+
+# 4. View logs
+tail -f ~/Library/Logs/slack-gateway/stdout.log
+
+# To unload:
+# launchctl unload ~/Library/LaunchAgents/com.agentic-workflow.slack-gateway.plist
+```
+
+### Slack Bot Setup (Required for Gateway)
+
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From Manifest
+2. Enable **Socket Mode** (you'll get an `xapp-` token)
+3. Add Bot Token Scopes: `chat:write`, `im:write`, `channels:history`, `im:history`, `app_mentions:read`
+4. Subscribe to events: `message.im`, `message.channels`
+5. Install the app to your workspace (get `xoxb-` token)
+6. Find your output channel ID: right-click channel in Slack → "Copy link" → extract last part (e.g. `C01234ABCDEF`)
+
+### Environment Variables Summary
+
+| Variable | Required? | Description |
+|----------|-----------|-------------|
+| `GEMINI_API_KEY` | Yes | Gemini API key for classification & pipeline |
+| `SLACK_BOT_TOKEN` | For gateway | Slack Bot token (`xoxb-...`) |
+| `SLACK_APP_TOKEN` | For gateway | Slack App token for Socket Mode (`xapp-...`) |
+| `SLACK_CHANNEL_ID` | No | Restrict gateway to a specific channel |
+| `SLACK_OUTPUT_CHANNEL_ID` | For reporter | Channel for daily pipeline results |
+| `FINNHUB_API_KEY` | No | News wire feed |
 
 ## Pipeline Overview
 
@@ -17,7 +166,7 @@ Regional ──> RSS ───────────┘       │
                                aggregated_content (1,500+ chars)
                                      │
                                      ▼
-                         ┌── DIMMEDIATE PERSISTENCE ──┐
+                         ┌── IMMEDIATE PERSISTENCE ──┐
                          │   (raw articles saved to     │
                          │    data/news.db BEFORE any    │
                          │    enrichment, ensuring zero  │
@@ -29,8 +178,8 @@ ToneAnalystNode ──> emotional_score + factual_score
                               │
                               ▼
 ClusterFinder ──> finds related articles for
-                    high-disparity pieces (±7 days)
-                    Uses keyword + word-level fallback
+                  high-disparity pieces (±7 days)
+                  Uses keyword + word-level fallback
                               │
                               ▼
      ┌── Backfill enrichment data into DB rows ──┐
@@ -59,21 +208,214 @@ ClusterFinder ──> finds related articles for
               ├── Step 1: Quant Researcher (DDG search + LLM synthesis)
               │   └── Target_Research_List (HEADLINE / PROXY / COMPETITOR / SUPPLIER)
               └── Step 2: Book Runner (LLM allocation + Python validator)
-                  └── PortfolioRecommendation (strict JSON) → Agent 4 (Risk Reviewer)
+                  └── PortfolioRecommendation (strict JSON)
+                           │
+                           ▼
+              Risk Reviewer (Agent 4)
+              ├── Optimization check
+              ├── Flaw detection
+              └── Veto or revise loop
+                           │
+                           ▼
+              Slack Output Reporter
+              └── Posts results to #portfolio-updates
 ```
 
-## Quick Start
+## Agents
+
+### SlackIngestionGateway (`src/utils/slack_gateway.py`)
+Asynchronous Slack bot using Socket Mode that:
+- Listens to direct messages or channel mentions 24/7
+- Classifies every message via `gemini-2.5-flash` with native structured output
+- Three-way routing: TRADE (immediate portfolio mutation), THESIS (staging table), NOISE (discard)
+- Full try/except boundaries — never crashes on bad input
+- Replies to the user on Slack with confirmation or error
+
+### SlackOutputReporter (`src/utils/slack_reporter.py`)
+Posts daily pipeline results to a separate Slack channel:
+- Formatting via Slack Block Kit (header, fields, dividers)
+- Shows proposed actions with ticker/action/horizon/reasoning
+- Includes narrative summaries (portfolio impact, proxy discoveries)
+- Graceful fallback to stdout if Slack is not configured
+
+### ScoutNode (`src/agents/ScoutNode.py`)
+First-stage enrichment engine (Agent 1) that:
+- **Scores importance** (0.0–1.0) via Gemini LLM native structured output (`ImportanceSchema`) or keyword heuristic
+- **Generates search queries** optimized for DuckDuckGo
+- **Aggregates snippets** from top-N DuckDuckGo results for rich context
+- **Async concurrency**: enriches articles with `asyncio.gather` capped by `asyncio.Semaphore(SCOUT_CONCURRENCY_LIMIT)` to avoid overwhelming the Gemini API
+- **Retry logic**: exponential-backoff retry for transient errors (429/503/5xx) via `tenacity`
+- **Safety-filter guard**: catches Gemini safety-filtered responses (`text=None`) and falls back to heuristics
+- **System instruction separated** from user content to prevent instruction-echo responses
+
+### ToneAnalystNode (`src/agents/ToneAnalystNode.py`)
+Emotional tonality analysis (Agent 1b) that separates language from substance:
+- **Emotional Score**: -1.0 (fear/panic) to +1.0 (euphoria)
+- **Factual Score**: 0.0 (pure opinion) to 1.0 (dense data/numbers)
+- **Disparity Score**: `|emotional| - factual` — high disparity signals potential market overreaction
+- **Tonality Labels**: `alarmist | measured | euphoric | clinical | balanced | sensationalist`
+- **Native structured output**: uses `TonalitySchema` Pydantic model with Gemini's `response_schema` to eliminate JSON parse failures
+- **Async concurrency**: same pattern as ScoutNode with `TONE_CONCURRENCY_LIMIT` semaphore
+- **Retry + safety-filter guard**: identical to ScoutNode
+
+### ClusterFinder (`src/agents/ClusterFinder.py`)
+For articles with high emotional disparity (Agent 1c):
+- Extracts keywords from factual claims, ticker tags, and title
+- Searches the database for related coverage within ±N days
+- Runs tonality analysis on found articles to compare emotional reactions
+- **Word-level fallback**: when primary keyword search returns 0 results, falls back to ticker symbols + long words for broader matching
+- **Async**: `find_clusters` and `_tone_analyst.analyze_batch` are now async
+
+### RegimeAnalystNode (`src/agents/RegimeAnalystNode.py`)
+Capital rotation and macro regime detector (Agent 2) — a strict quantitative gatekeeper:
+- **Ingests** all articles with their Scout and Tonality analysis, plus the current `MarketState` baseline
+- **LLM evaluates** three factors (1-10 each) via **native JSON mode** (Pydantic `RegimeResponse` schema with `response_mime_type="application/json"`)
+- **M (Macro Impact)**: Shifts in rates, inflation, growth vs baseline
+- **R (Rotation Intensity)**: Evidence of sector/intra-sector capital migration
+- **E (Emotional Arbitrage)**: Narrative over/under-reaction using disparity scores
+- **Python computes** weighted Significance Score: `S = αM + βR + γE` (where α=0.35, β=0.40, γ=0.25, configurable)
+- **Dual gate routing**: Score > 70 (composite) **OR** any single factor ≥ 7.0 (individual trigger) → routes to Portfolio Manager
+- **User thesis bypass**: If `state["force_trigger_pm"]` is True (theses pending), routes directly to PM regardless of score
+- **Safety-filter guard**: catches `text=None` responses and falls back to heuristic analysis
+- **Retry via `tenacity`**: exponential-backoff for transient failures
+
+### PortfolioManagerNode (`src/agents/PortfolioManagerNode.py`)
+The Optimizer & Execution Strategist (Agent 3) — invoked whenever the Regime Analyst's `Significance_Score > 70` OR user theses are pending.
+
+#### Step 1 — The Quant Researcher (Abstract Discovery & Proxy Hunting)
+1. Receives the **Significant_Regime_Payload** from Agent 2 and the **Current_Market_State**
+2. Calls the LLM to formulate **3-4 targeted DuckDuckGo queries** (suppliers, competitors, patterns, proxies)
+3. **User thesis injection**: If `user_theses` are present in state, injects them as mandatory verification targets — commands 1-2 queries to confirm/refute/expand on the manual thesis
+4. Executes queries via `ddgs`, aggregates snippets
+5. Optionally enriches targets with Finnhub market cap + price
+6. Calls the LLM to synthesize into a structured `Target_Research_List`
+
+Each target classified as: `HEADLINE | PROXY | COMPETITOR | SUPPLIER` with momentum evaluation.
+
+#### Step 2 — The Book Runner (Allocation & Risk Management)
+Single LLM call emits strict JSON trade plan. Python validator enforces:
+- `Action` ∈ {`EXPAND`, `DILUTE`, `ADD`}
+- `Time_Horizon` ∈ {`SHORT_TERM_MOMENTUM`, `LONG_TERM_HOLD`}
+- Ticker must exist in research list or current portfolio
+- Caps at `PORTFOLIO_MAX_PROPOSED_ACTIONS` (default 8)
+
+#### Revision Loop (Option B)
+When the Risk Reviewer rejects, `PortfolioManagerNode.revise_recommendation()` re-prompts the Book Runner with the prior recommendation + the critic's specific feedback (no fresh DDG / Finnhub work).
+
+### RiskReviewerNode (`src/agents/RiskReviewerNode.py`)
+The Critic (Agent 4) — Dual-Check Evaluation with **VETO POWER**:
+
+**1. OPTIMIZATION CHECK**: Did the PM use SMART PROXIES? Are actions internally consistent?
+**2. FLAW DETECTION**: Scans for contradictory articles, liquidity traps, concentration risk.
+
+**Routing:**
+```python
+approved                → "output_reporter"     → Slack output
+rejected & iter < MAX   → "portfolio_manager"   → revise
+rejected & iter == MAX  → "__end__"             → hard cap (configurable)
+```
+
+## Configuration
+
+All tunable constants live in **[`src/config.py`](src/config.py)** — the single source of truth:
+
+### Slack Gateway
+
+| Constant | Default (from env) | Description |
+|----------|---------|-------------|
+| `SLACK_BOT_TOKEN` | `""` | Bot token (`xoxb-...`) |
+| `SLACK_APP_TOKEN` | `""` | Socket Mode app token (`xapp-...`) |
+| `SLACK_CHANNEL_ID` | `""` | Restrict to specific channel (empty = all DMs) |
+| `SLACK_GATEWAY_MODEL` | `gemini-2.5-flash` | LLM for message classification |
+| `SLACK_SIGNAL_TEMPERATURE` | `0.1` | Classification LLM temperature |
+| `SLACK_SIGNAL_MAX_TOKENS` | `2000` | Classification max output tokens |
+| `SLACK_OUTPUT_CHANNEL_ID` | `""` | Channel for daily pipeline results |
+| `PENDING_THESES_DB_PATH` | `data/news.db` | SQLite database path |
+
+### All Other Constants
+
+See the config table in the original README for ScoutNode, ToneAnalystNode, ClusterFinder, Ingestor Limits, Regime Analyst, Portfolio Manager, Risk Reviewer, and Pipeline Thresholds — all in `src/config.py`.
+
+## Directory Structure
+
+```
+Agentic_Workflow/
+├── .venv/                           # Python virtual environment
+├── data/
+│   ├── news.db                      # SQLite database
+│   ├── news.sql                     # Schema definition
+│   ├── news_reset.sql               # Destructive schema reset
+│   └── slack_gateway.env            # Environment variable template
+├── requirements.txt                 # Dependencies
+├── run_pipeline.py                  # Main entry point
+├── run_slack_gateway.sh             # Slack gateway launcher script
+├── debug_pipeline.py                # Pipeline debug harness
+├── debug_portfolio_manager.py       # Portfolio Manager debug harness
+├── debug_slack_gateway.py          # Slack gateway classification tester
+├── com.agentic-workflow.slack-gateway.plist  # macOS launchd service
+└── src/
+    ├── __init__.py
+    ├── config.py                    # ★ Centralized configuration
+    ├── NewsArticle.py               # Pydantic validation schema
+    ├── state.py                     # ALL data classes + GraphState
+    ├── agents/
+    │   ├── ScoutNode.py             # Agent 1a: importance + search
+    │   ├── ToneAnalystNode.py       # Agent 1b: emotional tonality
+    │   ├── ClusterFinder.py         # Agent 1c: article clustering
+    │   ├── RegimeAnalystNode.py     # Agent 2: regime detection
+    │   ├── PortfolioManagerNode.py  # Agent 3: research + allocation
+    │   └── RiskReviewerNode.py     # Agent 4: critic + revise
+    ├── db/
+    │   └── DatabaseSink.py          # SQLite persistence
+    ├── ingestors/
+    │   ├── WireIngestor.py          # Finnhub API
+    │   ├── MacroBlogs.py            # Blog scraping
+    │   └── GlobalOutlets.py         # RSS feeds
+    └── utils/
+        ├── json_repair.py           # JSON recovery utility
+        ├── slack_gateway.py         # 24/7 Slack ingestion bot
+        └── slack_reporter.py        # Posts results to output channel
+```
+
+## Database Schema
+
+### Tables
+
+| Table | Description |
+|-------|-------------|
+| `articles` | All ingested news with Scout + Tonality enrichment |
+| `significant_articles` | Articles that triggered regime change (with full metrics) |
+| `portfolio_state` | Singleton row with current portfolio allocations |
+| `portfolio_state_history` | Audit trail of portfolio changes |
+| `pending_user_theses` | User-submitted theses from Slack (staging for pipeline) |
+
+### `pending_user_theses`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER | Primary key |
+| `ticker` | TEXT | Clean uppercase ticker (e.g. "TSLA") |
+| `core_argument` | TEXT | User's structural reasoning |
+| `time_horizon` | TEXT | `SHORT_TERM_MOMENTUM` or `LONG_TERM_HOLD` |
+| `raw_message` | TEXT | Original unformatted Slack message |
+| `timestamp` | TEXT | ISO-8601 submission timestamp |
+| `ingested_at` | TEXT | Auto-set DB insertion timestamp |
+
+## Debug Scripts
 
 ```bash
-# 1. Activate virtual environment
-source .venv/bin/activate
+# Test classification without Slack (no tokens needed)
+export GEMINI_API_KEY="your-key"
+python3 debug_slack_gateway.py
 
+# Test full pipeline with 5 articles
+python3 debug_pipeline.py
 # 2. Set API keys (optional — heuristic fallbacks work without them)
 export GEMINI_API_KEY="your_gemini_key_here"    # LLM-powered scoring & tonality
 export FINNHUB_API_KEY="your_finnhub_key_here"  # Wire/news feed
 
-# 3. Run the pipeline
-python3 run_pipeline.py
+# Test Portfolio Manager independently
+python3 debug_portfolio_manager.py
 ```
 
 Without API keys, the pipeline uses keyword-based heuristics — fully functional, just less nuanced than LLM-driven analysis.
@@ -488,9 +830,12 @@ regime signals where one factor is extreme but the weighted composite hasn't cro
 - `ddgs` — DuckDuckGo search (snippet aggregation)
 - `google-genai` — Gemini LLM (importance, tonality, queries, regime analysis)
 - `feedparser` — RSS feed parsing
-- `aiohttp` — Async HTTP client (Finnhub API)
-- `pydantic` — Data validation + structured output schemas
-- `Crawl4AI` — Macro blog content scraping
+- `aiohttp` — Async HTTP client
+- `pydantic` — Data validation + structured output schemas + structured output
+- `Crawl4AI` — Blog content scraping
 - `tenacity` — Exponential backoff retry for LLM API calls
+- `tenacity` — Retry logic
+- `slack-bolt` — Slack AsyncApp + Socket Mode
+- `slack-sdk` — Slack WebClient (for output reporter)
 
 Install with: `pip install -r requirements.txt`

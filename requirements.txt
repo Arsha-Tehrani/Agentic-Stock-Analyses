@@ -13,6 +13,10 @@ crawl4ai>=0.5                # Async web crawling for financial news scraping
 # Retry & resilience
 tenacity>=8.0                # Exponential backoff retry for LLM API calls
 
+# Slack Ingestion Gateway
+slack-bolt>=1.18             # Slack AsyncApp + Socket Mode for Slack gateway
+slack-sdk>=3.27              # Slack SDK dependency
+
 # Persistence
 aiosqlite>=0.20              # Async SQLite (optional, for future)
 pydantic>=2.0                # Data validation (NewsArticle.py)

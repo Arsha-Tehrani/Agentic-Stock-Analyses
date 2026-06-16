@@ -60,6 +60,7 @@ from src.state import (
     ProposedAction,
     PortfolioRecommendation,
     CriticFeedback,
+    UserThesis,
 )
 from src.config import (
     GEMINI_API_KEY,
@@ -142,6 +143,7 @@ class PortfolioManagerNode:
         articles = state.get("articles", [])
         market_state = state.get("market_state", REGIME_DEFAULT_MARKET_STATE)
         regime_analysis = state.get("regime_analysis")
+        user_theses = state.get("user_theses", [])
 
         if regime_analysis is None:
             print("\n  ⚠️  No regime_analysis in state. Skipping Portfolio Manager.")
@@ -152,7 +154,7 @@ class PortfolioManagerNode:
 
         try:
             # Step 1 — the Quant Researcher
-            target_list = self._run_researcher_chain(articles, regime_analysis, market_state)
+            target_list = self._run_researcher_chain(articles, regime_analysis, market_state, user_theses=user_theses)
             print(f"    🔍 Researcher surfaced {len(target_list.targets)} target(s) across "
                   f"{len(target_list.queries_used)} DDG query/queries.")
 
@@ -184,12 +186,16 @@ class PortfolioManagerNode:
         articles: List[ScoutArticle],
         regime_analysis: RegimeAnalysis,
         market_state: CurrentMarketState,
+        user_theses: Optional[List[UserThesis]] = None,
     ) -> TargetResearchList:
         """
         1a. Ask LLM for 3-4 DuckDuckGo search queries.
         1b. Execute those queries via ddgs.
         1c. Ask LLM to synthesize snippets + original payload into a structured
             Target_Research_List with HEADLINE/PROXY/COMPETITOR/SUPPLIER roles.
+
+        If user_theses are provided, they are injected into the system instruction
+        to command 1-2 web-verification queries targeting the manual theses.
         """
         if not self._client:
             return self._heuristic_researcher(articles, market_state)
@@ -198,7 +204,7 @@ class PortfolioManagerNode:
         regime_payload = self._build_regime_payload(articles, regime_analysis, market_state)
 
         # 1a — LLM formulates the search queries
-        queries_prompt = self._build_queries_prompt(regime_payload)
+        queries_prompt = self._build_queries_prompt(regime_payload, user_theses=user_theses)
         try:
             response = self._client.models.generate_content(
                 model=PORTFOLIO_GEMINI_MODEL,
@@ -347,11 +353,41 @@ class PortfolioManagerNode:
             f"{articles_summary}\n"
         )
 
-    def _build_queries_prompt(self, regime_payload: str) -> str:
-        """Ask the LLM for 3-4 web search queries to find proxies and momentum clues."""
-        return (
+    def _build_queries_prompt(
+        self,
+        regime_payload: str,
+        user_theses: Optional[List[UserThesis]] = None,
+    ) -> str:
+        """Ask the LLM for 3-4 web search queries to find proxies and momentum clues.
+
+        If user_theses are provided, they are injected as mandatory verification
+        targets, commanding 1-2 dedicated web-verification queries.
+        """
+        # ── Inject user theses block if present ──
+        user_theses_block = ""
+        if user_theses:
+            thesis_lines = []
+            for i, thesis in enumerate(user_theses, 1):
+                thesis_lines.append(
+                    f"  [{i}] Ticker: {thesis.ticker} | "
+                    f"Argument: {thesis.core_argument[:200]} | "
+                    f"Horizon: {thesis.time_horizon}"
+                )
+            user_theses_block = (
+                "\n=== MANUAL USER THESES (must verify) ===\n"
+                + "\n".join(thesis_lines)
+                + "\n\nIMPORTANT: Formulate 1-2 web-verification queries specifically "
+                  "targeting these user theses. You MUST find evidence that confirms, "
+                  "refutes, or expands on each thesis alongside your normal structural "
+                  "news processing.\n\n"
+            )
+
+        base_prompt = (
             "You are a senior research analyst at a hedge fund preparing a "
             "second-order thesis on a significant market event.\n\n"
+        )
+        base_prompt += user_theses_block
+        base_prompt += (
             "Given the REGIME PAYLOAD below, formulate exactly "
             f"{PORTFOLIO_DDG_QUERIES} highly targeted DuckDuckGo search queries "
             "that will help you find:\n"
@@ -359,6 +395,13 @@ class PortfolioManagerNode:
             "  2. Direct COMPETITORS that may offer cheaper exposure\n"
             "  3. Historical PATTERNS or PRECEDENTS of similar rotations\n"
             "  4. PROXY stocks that have historically tracked the headline theme\n\n"
+        )
+        if user_theses:
+            base_prompt += (
+                "  5. CONFIRMATION or REFUTATION evidence for the manual user "
+                "theses listed above\n\n"
+            )
+        base_prompt += (
             "Rules:\n"
             "- Each query is 4-9 keywords.\n"
             "- Include specific company / ticker / sector names where possible.\n"
@@ -368,6 +411,7 @@ class PortfolioManagerNode:
             '{"queries": ["query one", "query two", "query three", "query four"]}\n\n'
             f"{regime_payload}"
         )
+        return base_prompt
 
     def _build_synthesis_prompt(
         self,
