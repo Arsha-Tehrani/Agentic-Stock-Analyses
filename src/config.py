@@ -17,6 +17,19 @@ import os
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "API Key")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")  # Global fallback
 
+# =============================================================================
+# Slack Ingestion Gateway
+# =============================================================================
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
+SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")
+SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "")             # For channel mentions, optional
+SLACK_GATEWAY_MODEL = os.environ.get("SLACK_GATEWAY_MODEL", "gemini-2.5-flash")
+SLACK_SIGNAL_TEMPERATURE = float(os.environ.get("SLACK_SIGNAL_TEMPERATURE", "0.1"))
+SLACK_SIGNAL_MAX_TOKENS = int(os.environ.get("SLACK_SIGNAL_MAX_TOKENS", "2000"))
+
+# Slack Output Reporter — posts daily pipeline results to a separate channel
+SLACK_OUTPUT_CHANNEL_ID = os.environ.get("SLACK_OUTPUT_CHANNEL_ID", "")
+
 # Per-agent model selection (explicit environment variable names)
 SCOUT_GEMINI_MODEL = os.environ.get("SCOUT_GEMINI_MODEL", "gemini-2.5-flash") #Doer
 TONALITY_GEMINI_MODEL = os.environ.get("TONALITY_GEMINI_MODEL", "gemini-2.5-flash") # Slightly thinker model or maybe just light one

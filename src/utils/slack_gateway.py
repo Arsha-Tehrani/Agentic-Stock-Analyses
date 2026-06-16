@@ -46,10 +46,9 @@ from src.config import (
     SLACK_GATEWAY_MODEL,
     SLACK_SIGNAL_TEMPERATURE,
     SLACK_SIGNAL_MAX_TOKENS,
-    PENDING_THESES_DB_PATH,
 )
 
-# Resolve PENDING_THESES_DB_PATH relative to the project root
+# Resolve the shared database path relative to the project root
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _THESES_DB_PATH = os.path.join(_PROJECT_ROOT, "data", "news.db")
 
