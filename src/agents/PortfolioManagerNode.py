@@ -828,8 +828,10 @@ class PortfolioManagerNode:
                     "max_output_tokens": PORTFOLIO_REVISE_MAX_TOKENS,
                 },
             )
+            if response.text is None:
+                raise ValueError("Portfolio Manager revise LLM response was safety-filtered (text=None)")
             text = self._strip_code_fences(response.text)
-            data = json.loads(text)
+            data = parse_json_with_repair(text)
 
             # Re-validate the proposed actions against the universe
             # (target_list universe is the prior rec's tickers + portfolio)

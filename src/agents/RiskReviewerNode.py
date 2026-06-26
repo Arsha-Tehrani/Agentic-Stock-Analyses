@@ -29,7 +29,6 @@ prevent the agent chain from getting stuck in an infinite disagreement.
 All tunable constants live in `src/config.py`.
 """
 
-import json
 from typing import List, Optional
 
 from google import genai
@@ -52,6 +51,7 @@ from src.config import (
     RISK_MAX_SINGLE_POSITION_PCT,
     RISK_MAX_SECTOR_PCT,
 )
+from src.utils.json_repair import parse_json_with_repair
 
 
 # =============================================================================
@@ -325,8 +325,10 @@ class RiskReviewerNode:
                 "max_output_tokens": RISK_REVIEWER_MAX_TOKENS,
             },
         )
+        if response.text is None:
+            raise ValueError("Risk Reviewer LLM response was safety-filtered (text=None)")
         text = self._strip_code_fences(response.text)
-        data = json.loads(text)
+        data = parse_json_with_repair(text)
 
         approval = bool(data.get("approval_status", False))
         feedback = str(data.get("critic_feedback", "")).strip()

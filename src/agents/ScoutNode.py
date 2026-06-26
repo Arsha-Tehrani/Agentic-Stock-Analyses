@@ -340,6 +340,7 @@ class ScoutNode:
             raise ValueError("Gemini returned None (safety-filtered response)")
         return parse_json_with_repair(text)
 
+    @_llm_retry_decorator
     async def _call_gemini_text(
         self, model: str, system_instruction: str, contents: str,
         temperature: float, max_tokens: int,

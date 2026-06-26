@@ -36,26 +36,6 @@ class EmotionalAnalysis:
 
 
 @dataclass
-class EmotionalAnalysis:
-    """
-    LLM-driven emotional tonality analysis that separates the emotional
-    language of an article from its factual/numeric content.
-
-    Key insight: emotional_disparity = |emotional_score - factual_score|
-    A high disparity suggests the article's tone is significantly more
-    charged (positively or negatively) than the actual data warrants.
-    """
-
-    emotional_score: float          # -1.0 (very negative) to +1.0 (very positive)
-    factual_score: float            # 0.0 (no facts/numbers) to 1.0 (dense factual content)
-    disparity_score: float          # abs(emotional_score) - factual_score, clipped to 0-1
-    tonality_label: str             # "alarmist", "measured", "euphoric", "clinical", "balanced", "sensationalist"
-    reasoning: str                  # LLM explanation of the disparity
-    key_emotional_phrases: List[str] = field(default_factory=list)
-    key_factual_claims: List[str] = field(default_factory=list)
-
-
-@dataclass
 class ScoutArticle:
     """
     Enriched article returned by the Scout node.

@@ -477,10 +477,11 @@ class DatabaseSink:
         from datetime import datetime
 
         conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
         try:
             # Get current version for history archival
             current = conn.execute(
-                "SELECT id, timestamp, macro_baseline, portfolio_allocations, version "
+                "SELECT id, timestamp, macro_baseline, portfolio_allocations, updated_by, version "
                 "FROM portfolio_state WHERE id = 1"
             ).fetchone()
 
@@ -495,7 +496,7 @@ class DatabaseSink:
                         current["timestamp"],
                         current["macro_baseline"],
                         current["portfolio_allocations"],
-                        current.get("updated_by", "system"),
+                        current["updated_by"],
                         reason or "Scheduled update",
                     ),
                 )

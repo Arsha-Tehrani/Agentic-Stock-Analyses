@@ -1,42 +1,63 @@
 """
 config.py – Centralized configuration for the Agentic Workflow pipeline.
 
+Secrets (API keys, tokens) are loaded from a `secrets.env` file in the
+project root.  Copy `secrets.template.env` → `secrets.env` and fill in
+your real values.  `secrets.env` is gitignored and never committed.
+
+To override any value at runtime, set the corresponding environment
+variable before running, for example:
+
+    export GEMINI_MODEL="gemini-2.0-flash"
+    python run_pipeline.py
+
 All tunable constants live here so they can be adjusted in one place
 without digging through individual agent files.
-
-To override API keys, set environment variables before running:
-    export GEMINI_API_KEY="your_key_here"
-    export FINNHUB_API_KEY="your_key_here"
 """
 
 import os
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Load secrets from project-root /secrets.env (silently skip if missing)
+# ---------------------------------------------------------------------------
+_env_path = Path(__file__).resolve().parent.parent / "secrets.env"
+if _env_path.is_file():
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(_env_path, override=True)
+    except ImportError:
+        pass  # python-dotnet not installed – rely on real env vars instead
+# If secrets.env doesn't exist we simply rely on os.environ.get() below,
+# which will return None/default for any missing keys.
 
 # =============================================================================
 # LLM / Gemini Configuration
 # =============================================================================
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "API Key")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")  # Global fallback
 
 # =============================================================================
 # Slack Ingestion Gateway
 # =============================================================================
-SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
-SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")
-SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "")             # For channel mentions, optional
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
+SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN")
+SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID")                # For channel mentions, optional
 SLACK_GATEWAY_MODEL = os.environ.get("SLACK_GATEWAY_MODEL", "gemini-2.5-flash")
 SLACK_SIGNAL_TEMPERATURE = float(os.environ.get("SLACK_SIGNAL_TEMPERATURE", "0.1"))
 SLACK_SIGNAL_MAX_TOKENS = int(os.environ.get("SLACK_SIGNAL_MAX_TOKENS", "2000"))
 
 # Slack Output Reporter — posts daily pipeline results to a separate channel
-SLACK_OUTPUT_CHANNEL_ID = os.environ.get("SLACK_OUTPUT_CHANNEL_ID", "")
+SLACK_OUTPUT_CHANNEL_ID = os.environ.get("SLACK_OUTPUT_CHANNEL_ID")
 
 # Per-agent model selection (explicit environment variable names)
-SCOUT_GEMINI_MODEL = os.environ.get("SCOUT_GEMINI_MODEL", "gemini-2.5-flash") #Doer
-TONALITY_GEMINI_MODEL = os.environ.get("TONALITY_GEMINI_MODEL", "gemini-2.5-flash") # Slightly thinker model or maybe just light one
-REGIME_GEMINI_MODEL = os.environ.get("REGIME_GEMINI_MODEL", "gemini-3.1-pro-preview") #Thinker model
-PORTFOLIO_GEMINI_MODEL = os.environ.get("PORTFOLIO_GEMINI_MODEL", "gemini-3.1-pro-preview") #Super Thinker model
-RISK_REVIEWER_GEMINI_MODEL = os.environ.get("RISK_REVIEWER_GEMINI_MODEL", "gemini-3.1-pro-preview") #Critic model
-PORTFOLIO_REVISE_GEMINI_MODEL = os.environ.get("PORTFOLIO_REVISE_GEMINI_MODEL", "gemini-3.1-pro-preview") #Revise model
+SCOUT_GEMINI_MODEL = os.environ.get("SCOUT_GEMINI_MODEL", "gemini-2.5-flash")               # Doer
+TONALITY_GEMINI_MODEL = os.environ.get("TONALITY_GEMINI_MODEL", "gemini-2.5-flash")          # Slightly thinker model
+REGIME_GEMINI_MODEL = os.environ.get("REGIME_GEMINI_MODEL", "gemini-3.1-pro-preview")       # Thinker model
+PORTFOLIO_GEMINI_MODEL = os.environ.get("PORTFOLIO_GEMINI_MODEL", "gemini-3.1-pro-preview") # Super Thinker
+RISK_REVIEWER_GEMINI_MODEL = os.environ.get("RISK_REVIEWER_GEMINI_MODEL", "gemini-3.1-pro-preview")  # Critic
+PORTFOLIO_REVISE_GEMINI_MODEL = os.environ.get("PORTFOLIO_REVISE_GEMINI_MODEL", "gemini-3.1-pro-preview")  # Revise
 
 # =============================================================================
 # ScoutNode – Enrichment Engine
@@ -110,11 +131,8 @@ CLUSTER_DISPARITY_THRESHOLD = 0.35   # Same as ToneAnalyst threshold (sync'd)
 # =============================================================================
 # Ingestion Sources
 # =============================================================================
-# Finnhub wire API key
-WIRE_API_KEY = os.environ.get(
-    "FINNHUB_API_KEY",
-    "d8g80l9r01qlgcuhr95gd8g80l9r01qlgcuhr960",
-)
+# Finnhub wire API key (loaded from secrets.env or environment variable)
+WIRE_API_KEY = os.environ.get("FINNHUB_API_KEY")
 
 # Macro blog scraping targets
 BLOG_TARGETS = [
@@ -138,8 +156,8 @@ RSS_MAX_PER_FEED = 20        # Regional RSS feed entries per source
 # Regime Analyst – Capital Rotation & Macro Regime Detection
 # =============================================================================
 # LLM temperatures
-REGIME_LLM_TEMPERATURE = 0.15 #How creative or "Conservative" the model is. 0-1. Higher is less conservative
-REGIME_LLM_MAX_TOKENS = 2500   # Room for 3 analysis paragraphs + scores + JSON (was 1200)
+REGIME_LLM_TEMPERATURE = 0.15        # How creative/"Conservative" the model is. 0-1.
+REGIME_LLM_MAX_TOKENS = 2500         # Room for 3 analysis paragraphs + scores + JSON
 REGIME_INDIVIDUAL_TRIGGER_THRESHOLD = 7.0  # Individual factor score ≥ this triggers regime flag
 
 # Scoring weights (LLM scores each factor 1-10, code computes weighted S)
@@ -268,12 +286,12 @@ PORTFOLIO_FINNHUB_TIMEOUT = 10       # seconds per request
 # =============================================================================
 # Critic: low temperature, deterministic veto power. Be ruthless.
 RISK_REVIEWER_TEMPERATURE = 0.1
-RISK_REVIEWER_MAX_TOKENS = 800
+RISK_REVIEWER_MAX_TOKENS = 6000
 
 # PM revise chain (Option B): in-place revision of the existing recommendation
 # given the critic's feedback. Low temperature too — apply the suggested fix.
 PORTFOLIO_REVISE_TEMPERATURE = 0.15
-PORTFOLIO_REVISE_MAX_TOKENS = 1000
+PORTFOLIO_REVISE_MAX_TOKENS = 6000
 
 # Hard cap on how many times Agent 3 ↔ Agent 4 can disagree before the loop
 # terminates (and the graph ends with the most recent feedback attached).

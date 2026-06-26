@@ -1,6 +1,8 @@
 .venv/
 .DS_Store
-src/config.py
 __pycache__/
 *.pyc
 *.db
+secrets.env
+data/slack_gateway.env
+log.txt

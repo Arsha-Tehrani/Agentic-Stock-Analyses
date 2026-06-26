@@ -1,14 +1,13 @@
 """
 run_pipeline.py – Multi-bucket news ingestion pipeline with Scout enrichment,
 emotional tonality analysis, and related-article clustering.
-run_pipeline.py – Multi-bucket news ingestion pipeline with Scout enrichment,
-emotional tonality analysis, and related-article clustering.
 
 Usage:
     python3 run_pipeline.py
 """
 
 import asyncio
+import os
 import sqlite3
 import sys
 from contextlib import contextmanager
@@ -71,29 +70,6 @@ from src.config import (
 # Database path for pending user theses (same as DatabaseSink)
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 _THESES_DB_PATH = os.path.join(_PROJECT_ROOT, "data", "news.db")
-from src.agents.ToneAnalystNode import ToneAnalystNode
-from src.agents.ClusterFinder import ClusterFinder
-from src.agents.RegimeAnalystNode import RegimeAnalystNode
-from src.agents.PortfolioManagerNode import (
-    PortfolioManagerNode,
-    route_after_portfolio_manager,
-    print_recommendation,
-)
-from src.agents.RiskReviewerNode import (
-    RiskReviewerNode,
-    route_after_risk_reviewer,
-)
-from src.state import GraphState
-from src.config import RISK_REVIEW_MAX_ITERATIONS
-from src.config import (
-    WIRE_API_KEY,
-    BLOG_TARGETS,
-    REGIONAL_FEEDS,
-    IMPORTANCE_HIGH_THRESHOLD,
-    DISPARITY_HIGH_THRESHOLD,
-    REGIME_DEFAULT_MARKET_STATE,
-)
-from src.state import PortfolioState
 
 
 async def main_pipeline() -> List[ScoutArticle]:

@@ -114,6 +114,7 @@ class SlackIngestionGateway:
 
         # ── Slack Bolt AsyncApp (lazy init in start()) ──
         self._app = None
+        self._bot_user_id: Optional[str] = None
 
     async def start(self):
         """
@@ -138,6 +139,11 @@ class SlackIngestionGateway:
             return
 
         self._app = AsyncApp(token=SLACK_BOT_TOKEN)
+
+        # Resolve the bot's own user ID once at startup so channel-mention
+        # detection checks against the bot, not the message sender.
+        auth_info = await self._app.client.auth_test()
+        self._bot_user_id = auth_info.get("user_id")
 
         # Register the message handler
         @self._app.event("message")
@@ -168,10 +174,7 @@ class SlackIngestionGateway:
 
             # If this is a channel message, check if the bot is mentioned
             if channel_type in ("channel", "group", "mpim"):
-                # Get the bot user ID from the event's authorizations or use the app
-                bot_user_id = event.get("user", "")
-                mention = f"<@{bot_user_id}>"
-                if mention not in raw_text:
+                if not self._bot_user_id or f"<@{self._bot_user_id}>" not in raw_text:
                     return
 
             user_id = event.get("user", "")
@@ -307,6 +310,11 @@ class SlackIngestionGateway:
         Loads the current portfolio state, locates the ticker, and adjusts
         its concentration_percent by a default increment (e.g., 1% for EXPAND,
         1% for DILUTE, or inserts a new position at 1% for ADD).
+
+        Note: the read-modify-write below is not wrapped in a single SQLite
+        transaction, so two TRADE messages arriving within milliseconds of
+        each other could race and one update could be lost. Low risk for a
+        single-user DM workflow; revisit if this gateway is ever shared.
         """
         ticker = signal.ticker
         action = signal.action
