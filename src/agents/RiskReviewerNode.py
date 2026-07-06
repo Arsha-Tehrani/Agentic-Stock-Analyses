@@ -52,6 +52,7 @@ from src.config import (
     RISK_MAX_SECTOR_PCT,
 )
 from src.utils.json_repair import parse_json_with_repair
+from src.utils.cost_logger import log_gemini_usage
 
 
 # =============================================================================
@@ -325,6 +326,7 @@ class RiskReviewerNode:
                 "max_output_tokens": RISK_REVIEWER_MAX_TOKENS,
             },
         )
+        log_gemini_usage("RiskReviewerNode", RISK_REVIEWER_GEMINI_MODEL, response)
         if response.text is None:
             raise ValueError("Risk Reviewer LLM response was safety-filtered (text=None)")
         text = self._strip_code_fences(response.text)

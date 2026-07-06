@@ -19,7 +19,7 @@ import asyncio
 from typing import List, Optional
 
 from src.db.DatabaseSink import DatabaseSink
-from src.state import ScoutArticle
+from src.state import ScoutArticle, EmotionalAnalysis
 from src.agents.ToneAnalystNode import ToneAnalystNode
 from src.config import (
     CLUSTER_DAYS_WINDOW,
@@ -75,10 +75,16 @@ class ClusterFinder:
             try:
                 related = self._find_related(article)
                 if related:
-                    # Run tonality on the related articles so we can compare
-                    await self._tone_analyst.analyze_batch(related)
+                    # Reuse tonality scores already stored from a prior run;
+                    # only pay for a fresh Gemini call on articles that don't
+                    # have one yet.
+                    needs_analysis = [a for a in related if a.emotional_analysis is None]
+                    reused_count = len(related) - len(needs_analysis)
+                    if needs_analysis:
+                        await self._tone_analyst.analyze_batch(needs_analysis)
                     article.related_articles = related
-                    print(f"      📰 Found {len(related)} related article(s) — emotional comparison ready")
+                    print(f"      📰 Found {len(related)} related article(s) — "
+                          f"{reused_count} reused from cache, {len(needs_analysis)} freshly analyzed")
                 else:
                     print(f"      ⚠️  No related articles found in database (within ±{CLUSTER_DAYS_WINDOW} days)")
             except Exception as e:
@@ -136,7 +142,7 @@ class ClusterFinder:
         # Convert NewsArticle -> ScoutArticle (lightweight, no Scout enrichment needed)
         related: List[ScoutArticle] = []
         for raw in raw_articles:
-            related.append(ScoutArticle(
+            scout_article = ScoutArticle(
                 source_bucket=raw.source_bucket,
                 source_name=raw.source_name,
                 title=raw.title,
@@ -146,7 +152,21 @@ class ClusterFinder:
                 ticker_tags=raw.ticker_tags,
                 aggregated_content=raw.content,  # Use DB content as context for tone analysis
                 importance_score=raw.importance_score or 0.0,
-            ))
+            )
+            # Reuse the tonality score already stored for this article (from a
+            # prior run's ToneAnalystNode pass) instead of re-paying for a
+            # fresh Gemini call on data we already have.
+            if raw.emotional_score is not None:
+                scout_article.emotional_analysis = EmotionalAnalysis(
+                    emotional_score=raw.emotional_score,
+                    factual_score=raw.factual_score,
+                    disparity_score=raw.disparity_score,
+                    tonality_label=raw.tonality_label or "",
+                    reasoning=raw.emotional_reasoning or "",
+                    key_emotional_phrases=raw.emotional_phrases or [],
+                    key_factual_claims=raw.factual_claims or [],
+                )
+            related.append(scout_article)
 
         if not related:
             print(f"      ⚠️  Keywords searched: {keywords[:10]}")

@@ -57,6 +57,7 @@ from src.agents.RiskReviewerNode import (
 )
 from src.state import GraphState, UserThesis, PortfolioState
 from src.utils.slack_reporter import SlackOutputReporter
+from src.utils.cost_logger import print_run_summary
 from src.config import RISK_REVIEW_MAX_ITERATIONS
 from src.config import (
     WIRE_API_KEY,
@@ -334,6 +335,8 @@ async def main_pipeline() -> List[ScoutArticle]:
         print("=" * 60)
         print("Pipeline finished. Regime-analyzed articles ready for review.")
         print("=" * 60)
+
+        print_run_summary()
 
         return enriched_articles
 

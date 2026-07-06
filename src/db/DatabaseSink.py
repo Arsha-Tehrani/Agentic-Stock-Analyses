@@ -261,6 +261,13 @@ class DatabaseSink:
                     timestamp=datetime.fromisoformat(row["timestamp"]),
                     ticker_tags=json.loads(row["ticker_tags"]) if row["ticker_tags"] else [],
                     importance_score=row["importance_score"],
+                    emotional_score=row["emotional_score"],
+                    factual_score=row["factual_score"],
+                    disparity_score=row["disparity_score"],
+                    tonality_label=row["tonality_label"],
+                    emotional_reasoning=row["emotional_reasoning"],
+                    emotional_phrases=json.loads(row["emotional_phrases"]) if row["emotional_phrases"] else None,
+                    factual_claims=json.loads(row["factual_claims"]) if row["factual_claims"] else None,
                 ))
             return articles
         finally:

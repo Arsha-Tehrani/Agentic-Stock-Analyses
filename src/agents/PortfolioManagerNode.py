@@ -83,6 +83,7 @@ from src.config import (
     REGIME_DEFAULT_MARKET_STATE,
 )
 from src.utils.json_repair import parse_json_with_repair
+from src.utils.cost_logger import log_gemini_usage
 import time as time_module
 
 
@@ -214,6 +215,7 @@ class PortfolioManagerNode:
                     "max_output_tokens": PORTFOLIO_RESEARCHER_MAX_TOKENS,
                 },
             )
+            log_gemini_usage("PortfolioManager:Researcher-Queries", PORTFOLIO_GEMINI_MODEL, response)
             queries_text = self._strip_code_fences(response.text)
             queries_data = parse_json_with_repair(queries_text)
             raw_queries = queries_data.get("queries", [])
@@ -245,6 +247,7 @@ class PortfolioManagerNode:
                     "max_output_tokens": PORTFOLIO_RESEARCHER_MAX_TOKENS,
                 },
             )
+            log_gemini_usage("PortfolioManager:Researcher-Synthesis", PORTFOLIO_GEMINI_MODEL, response)
             synth_text = self._strip_code_fences(response.text)
             synth_data = parse_json_with_repair(synth_text)
 
@@ -736,6 +739,7 @@ class PortfolioManagerNode:
                         "max_output_tokens": PORTFOLIO_ALLOCATOR_MAX_TOKENS,
                     },
                 )
+                log_gemini_usage("PortfolioManager:Allocator", PORTFOLIO_GEMINI_MODEL, response)
                 text = self._strip_code_fences(response.text)
                 data = parse_json_with_repair(text)
                 # Basic validation: must have Portfolio_Impact_Assessment
@@ -828,6 +832,7 @@ class PortfolioManagerNode:
                     "max_output_tokens": PORTFOLIO_REVISE_MAX_TOKENS,
                 },
             )
+            log_gemini_usage("PortfolioManager:Revise", PORTFOLIO_REVISE_GEMINI_MODEL, response)
             if response.text is None:
                 raise ValueError("Portfolio Manager revise LLM response was safety-filtered (text=None)")
             text = self._strip_code_fences(response.text)

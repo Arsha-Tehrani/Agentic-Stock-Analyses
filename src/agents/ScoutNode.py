@@ -39,6 +39,7 @@ from tenacity import (
 from src.NewsArticle import NewsArticle
 from src.state import ScoutArticle
 from src.utils.json_repair import parse_json_with_repair
+from src.utils.cost_logger import log_gemini_usage
 from src.config import (
     GEMINI_API_KEY,
     SCOUT_GEMINI_MODEL,
@@ -307,6 +308,7 @@ class ScoutNode:
                 contents=contents,
                 config=config,
             )
+            log_gemini_usage("ScoutNode", model, response)
 
             print("\n--- DEBUG: GEMINI STRUCTURED OUTPUT ---")
             print(f"RAW TEXT RESPONSE:\n{response.text}")
@@ -358,6 +360,7 @@ class ScoutNode:
                     "system_instruction": system_instruction,
                 },
             )
+            log_gemini_usage("ScoutNode", model, response)
             # Guard against safety-filtered responses where .text is None
             if response.text is None:
                 return None

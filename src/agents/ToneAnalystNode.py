@@ -37,6 +37,7 @@ from tenacity import (
 )
 
 from src.state import ScoutArticle, EmotionalAnalysis
+from src.utils.cost_logger import log_gemini_usage
 from src.config import (
     GEMINI_API_KEY,
     TONALITY_GEMINI_MODEL,
@@ -310,6 +311,7 @@ class ToneAnalystNode:
                     "response_schema": schema,
                 },
             )
+            log_gemini_usage("ToneAnalystNode", model, response)
             if response.text is None:
                 raise ValueError("Gemini returned None (safety-filtered response)")
             return schema.model_validate_json(response.text)
@@ -333,6 +335,7 @@ class ToneAnalystNode:
                     "system_instruction": system_instruction,
                 },
             )
+            log_gemini_usage("ToneAnalystNode", model, response)
             # Guard against safety-filtered responses where .text is None
             if response.text is None:
                 return None

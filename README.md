@@ -133,6 +133,46 @@ tail -f ~/Library/Logs/slack-gateway/stdout.log
 # launchctl unload ~/Library/LaunchAgents/com.agentic-workflow.slack-gateway.plist
 ```
 
+### Windows
+
+The gateway's Python code is fully cross-platform — only the launch script differs. Use [run_slack_gateway.ps1](run_slack_gateway.ps1) instead of the bash script:
+
+```powershell
+# 1. Create and activate the virtual environment
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+# 2. Fill in real tokens in data\slack_gateway.env (copy from secrets.template.env if needed),
+#    or set them for the current session:
+$env:SLACK_BOT_TOKEN = "xoxb-..."
+$env:SLACK_APP_TOKEN = "xapp-..."
+$env:GEMINI_API_KEY = "..."
+$env:SLACK_OUTPUT_CHANNEL_ID = "C01234ABCDEF"
+
+# 3. Start the 24/7 Slack listener
+.\run_slack_gateway.ps1
+
+# 4. In another terminal, run the daily pipeline
+python run_pipeline.py
+```
+
+**Scheduling the daily pipeline (Task Scheduler, instead of cron):**
+
+```powershell
+# Run once as Administrator to register the scheduled task (fires daily at 9:00 AM)
+schtasks /Create /TN "AgenticWorkflowPipeline" /TR "powershell.exe -NoProfile -Command \"cd 'C:\path\to\Agentic-Stock-Analyses'; .venv\Scripts\python.exe run_pipeline.py\"" /SC DAILY /ST 09:00
+
+# Or via the GUI: Task Scheduler -> Create Task -> Triggers: Daily at 9:00 AM
+# -> Actions: Start a program -> .venv\Scripts\python.exe -> Arguments: run_pipeline.py
+# -> Start in: C:\path\to\Agentic-Stock-Analyses
+
+# To remove it later:
+# schtasks /Delete /TN "AgenticWorkflowPipeline" /F
+```
+
+There is no Windows equivalent of the macOS launchd service in this repo — `run_slack_gateway.ps1` is meant to be run in a persistent terminal/Task Scheduler "run whether user is logged on or not" task if you want it always-on.
+
 ### Slack Bot Setup (Required for Gateway)
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From Manifest
